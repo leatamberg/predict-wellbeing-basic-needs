@@ -1,0 +1,601 @@
+---
+title: "OLS regressions of wellbeing outcomes on GDP and need satisfiers"
+html_notebook: default
+---
+
+
+```{r, warning = FALSE, message=FALSE}
+library(readxl)
+library(writexl)
+library(dplyr)
+library(tidyverse)
+library(caret)
+library(countrycode)
+library(readr)
+library(stats)
+library(stargazer)
+library(latex2exp)
+library(janitor)
+library(viridis)
+library(factoextra)
+library(modelr)
+library(glmnet)
+library(tidymodels)
+library(mgcv)
+library(sfsmisc)
+library(earth)
+library(pdp)
+library(rpart.plot)
+library(ranger)
+library(rlang)
+library(leaps)
+library(rPref)
+library(ggfortify)
+library(gridExtra)
+library(lmtest)
+library(sandwich)
+
+
+# for Latex fonts: 
+library(extrafont)
+loadfonts(device = "win")
+
+tidymodels_prefer()
+
+source("../utils/utils_validation.R")
+```
+
+# Preparation
+## Data
+```{r}
+data_2015 <- 
+  read_xlsx("../data/dataset_need_satisfiers_2015.xlsx") 
+
+country_neighbors <- 
+  read_xlsx("../data/dataset_country_neighbors.xlsx")
+```
+
+
+## Base formulas
+```{r}
+formula_life_expect_all <- 
+  life_expect ~ 
+  undernourishment +
+         obesity +
+
+        
+         drinking_water_basic +
+         
+         electricity +
+         sanitation_basic +
+
+         clean_cooking_gbd +
+         air_pollution_particles +
+         air_pollution_ozone +
+         
+         uhc_who +
+         dtp3 +
+
+
+         unmet_contraception +
+         
+         social_support +
+         
+         stability +
+         
+         cbn_poverty +
+         unemployment_ilo +
+         
+         lower_secondary_school +
+
+         voice +
+
+         freedom +
+
+
+
+         alcohol +
+
+         HIV_unaids_untreated +
+
+         gdp
+  
+
+
+formula_life_expect_all_log <- 
+  life_expect ~ 
+  undernourishment +
+         obesity +
+
+        
+         drinking_water_basic +
+         
+         electricity +
+         sanitation_basic +
+
+         clean_cooking_gbd +
+         air_pollution_particles +
+         air_pollution_ozone +
+         
+         uhc_who +
+         dtp3 +
+
+
+         unmet_contraception +
+         
+         social_support +
+         
+         stability +
+         
+         cbn_poverty +
+         unemployment_ilo +
+         
+         lower_secondary_school +
+
+         voice +
+
+         freedom +
+
+
+
+         alcohol +
+
+         HIV_unaids_untreated +
+
+         log(gdp)
+
+formula_life_satisfaction_all <- 
+  life_satisfaction ~ 
+  undernourishment +
+         obesity +
+
+        
+         drinking_water_basic +
+         
+         electricity +
+         sanitation_basic +
+
+         clean_cooking_gbd +
+         air_pollution_particles +
+         air_pollution_ozone +
+         
+         uhc_who +
+         dtp3 +
+
+
+         unmet_contraception +
+         
+         social_support +
+         
+         stability +
+         
+         cbn_poverty +
+         unemployment_ilo +
+         
+         lower_secondary_school +
+
+         voice +
+
+         freedom +
+
+
+
+         alcohol +
+
+         HIV_unaids_untreated +
+
+         gdp
+  
+
+
+formula_life_satisfaction_all_log <- 
+  life_satisfaction ~ 
+  undernourishment +
+         obesity +
+
+        
+         drinking_water_basic +
+         
+         electricity +
+         sanitation_basic +
+
+         clean_cooking_gbd +
+         air_pollution_particles +
+         air_pollution_ozone +
+         
+         uhc_who +
+         dtp3 +
+
+
+         unmet_contraception +
+         
+         social_support +
+         
+         stability +
+         
+         cbn_poverty +
+         unemployment_ilo +
+         
+         lower_secondary_school +
+
+         voice +
+
+         freedom +
+
+
+
+         alcohol +
+
+         HIV_unaids_untreated +
+
+         log(gdp)
+
+```
+
+# Life expectancy
+
+
+## Significance of GDP
+### GDP only
+It is known that there is a logarithmic relationship between life expectancy and GDP.
+
+OLS for non-transformed GDP:
+```{r}
+ols_life_expect_gdp <- lm(life_expect~ gdp, data_2015)
+summary(ols_life_expect_gdp)
+```
+OLS for log-transformed GDP:
+```{r}
+ols_life_expect_gdp_log <- lm(life_expect ~ log(gdp), data_2015)
+summary(ols_life_expect_gdp_log)
+```
+As suspected, the fit is substantially better for log(GDP).
+
+
+Diagnostic plots:
+```{r}
+plots <- autoplot(ols_life_expect_gdp_log, which = c(1, 2, 3, 5)) +
+  theme_light() +
+theme(text = element_text(size=12, family="LM Roman 10"))
+# remove titles
+for (i in 1:4) {
+  plots[i] <- plots[i] + ggtitle(element_blank())
+}
+plots
+
+ggsave(file = "../results/figures/diagnostic_ols_life_expect_gdp_log.pdf", arrangeGrob(grobs = plots@plots), width = 160, height = 110, units = "mm", device=cairo_pdf)
+```
+We can see a violation of the normality assumption in the Q-Q plot as well as potential heteroscedasticity of the residuals. Let's do a test for heteroscedasticity:
+
+```{r}
+bptest(ols_life_expect_gdp_log)
+```
+Based on the p-value that is below 0.05, we reject the hypothesis of homoscedasticity. This means that we expect the robust standard errors to be different from the "standard" standard errors. 
+
+### all variables
+Question: Does the strong statistical effect of GDP persist when controlling for levels of need satisfaction?
+
+In order to compare the two models, we simply add all other predictors to the log-transformed GDP. Later, we will also have a look at the model with un-transformed GDP.
+
+#### log-transformed GDP
+
+```{r}
+ols_life_expect_log <- lm(formula_life_expect_all_log, data_2015)
+summary(ols_life_expect_log)
+```
+
+Diagnostic plots:
+```{r}
+plots <- autoplot(ols_life_expect_log, which = c(1, 2, 3, 5)) +
+  theme_light() +
+theme(text = element_text(size=12, family="LM Roman 10"))
+# remove titles
+for (i in 1:4) {
+  plots[i] <- plots[i] + ggtitle(element_blank())
+}
+plots
+ggsave(file = "../results/figures/diagnostic_ols_life_expect_all_log.pdf", arrangeGrob(grobs = plots@plots), width = 160, height = 110, units = "mm", device=cairo_pdf)
+```
+The Q-Q plot looks much better. However, the residuals look potentially heteroscedastic, let's check:
+```{r}
+bptest(ols_life_expect_log)
+```
+Again, we reject the null hypothesis of homoscedasticity (alpha = 0.05). 
+
+##### Summary table
+
+We can now make a summary table comparing the two models (only log-transformed GDP versus all predictors). Following Long & Ervin (2000), we use robust standard errors. We would have done so independent from the test result as they recommend to routinely use them; however, due to the test rejecting homoscedasticity, we have even more reason to do so. Also based on the recommendation of Long & Ervin, we use the HC3 estimator for robust standard errors.
+
+```{r}
+robust_se_gdp_log <- sqrt(diag(vcovHC(ols_life_expect_gdp_log, type = "HC3")))
+robust_se_all_log <- sqrt(diag(vcovHC(ols_life_expect_log, type = "HC3")))
+```
+
+
+```{r}
+stargazer(ols_life_expect_gdp_log, ols_life_expect_log, 
+          type = "text", # comment this line to obtain latex output
+          report = 'vc*', 
+          title = "Ordinary least squares results for life expectancy", 
+          #dep.var.caption = "Life satisfaction (0-10 Cantril Scale)", 
+          dep.var.labels = "Life expectancy (years)", 
+          #column.labels=c("original units", "standardised predictors"), 
+          covariate.labels = c("Intercept", "Undernourishment", "Obesity", "Drinking water", "Electricity", "Sanitation", "Clean cooking", "Air pollution (particles)", "Air pollution (ozone)", "UHC", "DTP3", "Unmet contraception", "Social support", "Stability", "CBN poverty", "Unemployment", "Lower secondary school", "Voice", "Freedom", "Alcohol", "HIV (untreated)", "log(GDP)","GDP"),
+          intercept.bottom = FALSE, 
+          align = TRUE, 
+          se = list(robust_se_gdp_log, robust_se_all_log),
+          omit.stat=c("LL","f"), 
+          star.char = c("+","*","**","***"),
+          star.cutoffs =c(0.1, 0.05, 0.01, 0.001), 
+          notes = c("$+$ p$<$0.1; $^*$ p$<$0.05; $^{**}$ p$<$0.01; $^{***}$ p$<$0.001"),
+          notes.append = F, 
+          model.numbers=T, 
+          no.space=T,
+          label= "tab:ols_le"
+          )
+```
+We can see that in the full model, the effect of GDP is insignificant (alpha = 0.1). This means that we cannot reject the null hypothesis that there is no effect. 
+However, this does not allow us to conclude that there is no effect. Other potential explanations are that the power of the test is too low or that there is actually a nonlinear effect.
+
+
+We also compute the Moran index for both fits. Unfortunately, we have to manually insert this statistic in our summary table.
+```{r}
+lm_residual_moran_neighbors(ols_life_expect_gdp_log, data_2015, country_neighbors, name_true_values = "life_expect")
+```
+```{r}
+lm_residual_moran_neighbors(ols_life_expect_log, data_2015, country_neighbors, name_true_values = "life_expect")
+```
+
+
+#### untransformed GDP
+
+We also look at the fit for the full model but with untransformed GDP to check whether this might turn the effect significant:
+
+```{r}
+ols_life_expect <- lm(formula_life_expect_all, data_2015)
+summary(ols_life_expect)
+```
+The fit is slightly better than with log-transformed GDP. The coefficient for GDP is hard to interpret as it is now for one dollar. We also obtain the fit for the standardised predictors in order to make them easier to compare:
+
+
+```{r}
+ols_life_expect_scaled <- lm(formula_life_expect_all, data_2015 %>% mutate(across(where(is.numeric) & !population & !life_expect,  ~(scale(.) %>% as.vector))))
+summary(ols_life_expect_scaled)
+
+```
+
+Let's get the summary table with robust standard errors.
+
+
+```{r}
+robust_se_all <- sqrt(diag(vcovHC(ols_life_expect, type = "HC3")))
+robust_se_all_scaled <- sqrt(diag(vcovHC(ols_life_expect_scaled, type = "HC3")))
+stargazer(ols_life_expect, ols_life_expect_scaled ,
+          #type = "text",
+          report = 'vc*', 
+          title = "Ordinary least squares regression coefficients for life expectancy, predictors in original units (1) and standardised (2)", 
+          #dep.var.caption = "Life satisfaction (0-10 Cantril Scale)", 
+          dep.var.labels = "Life expectancy (years)", 
+          #column.labels=c("original units", "standardised predictors"), 
+          covariate.labels = c("Intercept", "Undernourishment", "Obesity", "Drinking water", "Electricity", "Sanitation", "Clean cooking", "Air pollution (particles)", "Air pollution (ozone)", "UHC", "DTP3", "Unmet contraception", "Social support", "Stability", "CBN poverty", "Unemployment", "Lower secondary school", "Voice", "Freedom", "Alcohol", "HIV (untreated)", "GDP"),
+          intercept.bottom = FALSE,
+          align = TRUE, 
+          omit.stat=c("LL","f"), 
+          se = list(robust_se_all, robust_se_all_scaled),
+          star.char = c("+","*","**","***"),
+          star.cutoffs =c(0.1, 0.05, 0.01, 0.001), 
+          notes = c("$^+$ p$<$0.1; $^*$ p$<$0.05; $^{**}$ p$<$0.01; $^{***}$ p$<$0.001"),
+          notes.append = F,  
+          model.numbers=T, 
+          no.space=T,
+          label= "tab:ols_le_stand"
+          )
+```
+
+Moran's I
+```{r}
+lm_residual_moran_neighbors(ols_life_expect, data_2015, country_neighbors, name_true_values = "life_expect")
+```
+
+diagnostic plots
+```{r}
+plots <- autoplot(ols_life_expect, which = c(1, 2, 3, 5)) +
+  theme_light() +
+theme(text = element_text(size=12, family="LM Roman 10"))
+# remove titles
+for (i in 1:4) {
+  plots[i] <- plots[i] + ggtitle(element_blank())
+}
+plots
+ggsave(file = "../results/figures/diagnostic_ols_life_expect_all.pdf", arrangeGrob(grobs = plots@plots), width = 160, height = 110, units = "mm", device=cairo_pdf)
+```
+
+
+## F-test
+
+Since we know that we have a heteroscedasticity problem, we cannot use the standard F-test to test whether including need satisfier levels significantly improves the amount of variance explained. We have to use the heteroscedasticity robust standard errors, for which we use the Wald test function by R which allows customized covariance matrices.
+
+```{r}
+F_test_le <- waldtest(ols_life_expect_gdp_log, ols_life_expect_log, vcov = vcovHC(ols_life_expect_log, type = "HC3"), test = "F")
+F_test_le
+```
+Very small p-value, implying that the model including all the need satisfiers indeed improves the predictive power significantly
+
+```{r}
+stargazer(F_test_le, 
+          summary = FALSE, 
+          title = "Waldtest results for life expectancy model only including log-transformed GDP (1) versus model additionally including all other predictors (2)",
+          label = "tab:F_test_le")
+```
+
+
+
+# Life satisfaction
+## Significance of GDP
+### GDP only
+```{r}
+ols_ls_gdp_log <- lm(life_satisfaction ~ log(gdp), data_2015)
+summary(ols_ls_gdp_log)
+```
+diagnostic plots
+```{r}
+plots <- autoplot(ols_ls_gdp_log, which = c(1, 2, 3, 5)) +
+  theme_light() +
+theme(text = element_text(size=12, family="LM Roman 10"))
+# remove titles
+for (i in 1:4) {
+  plots[i] <- plots[i] + ggtitle(element_blank())
+}
+plots
+ggsave(file = "../results/figures/diagnostic_ols_life_satisfaction_gdp_log.pdf", arrangeGrob(grobs = plots@plots), width = 160, height = 110, units = "mm", device=cairo_pdf)
+```
+The Q-Q plot looks OK this time, however there seems to be some non-linearity not entirely captured by the model
+
+Test for heteroscedasticity:
+```{r}
+bptest(ols_ls_gdp_log)
+```
+
+### all variables
+Question: Does the strong statistical effect of GDP persist when controlling for levels of need satisfaction?
+
+
+#### log-transformed gdp
+```{r}
+ols_ls_log <- lm(formula_life_satisfaction_all_log, data_2015)
+summary(ols_ls_log)
+```
+diagnostic plots
+```{r}
+plots <- autoplot(ols_ls_log, which = c(1, 2, 3, 5)) +
+  theme_light() +
+theme(text = element_text(size=12, family="LM Roman 10"))
+# remove titles
+for (i in 1:4) {
+  plots[i] <- plots[i] + ggtitle(element_blank())
+}
+plots
+ggsave(file = "../results/figures/diagnostic_ols_life_satisfaction_all_log.pdf", arrangeGrob(grobs = plots@plots), width = 160, height = 110, units = "mm", device=cairo_pdf)
+```
+The plot does not indicate a violation of the homoscedasticity assumption. Since this is relevant for the F-test, let's nevertheless do a test:
+```{r}
+bptest(ols_ls_log)
+```
+we don't reject the null hypothesis of homoscedasticity. Nevertheless, following Long & Ervin (2000), we use robust standard errors. If the errors are indeed homoscedastic, the values should be very near to each other.
+
+##### Summary table
+
+
+```{r}
+robust_se_ls_gdp_log <- sqrt(diag(vcovHC(ols_ls_gdp_log, type = "HC3")))
+robust_se_ls_all_log <- sqrt(diag(vcovHC(ols_ls_log, type = "HC3")))
+```
+
+
+```{r}
+stargazer(ols_ls_gdp_log, ols_ls_log, 
+          #type = "text", # comment this line to obtain latex output
+          report = 'vc*', 
+          title = "Ordinary least squares results for life  satisfaction", 
+          #dep.var.caption = "Life satisfaction (0-10 Cantril Scale)", 
+          dep.var.labels = "Life satisfaction (0-10 Cantril Scale)", 
+          #column.labels=c("original units", "standardised predictors"), 
+          covariate.labels = c("Intercept", "Undernourishment", "Obesity", "Drinking water", "Electricity", "Sanitation", "Clean cooking", "Air pollution (particles)", "Air pollution (ozone)", "UHC", "DTP3", "Unmet contraception", "Social support", "Stability", "CBN poverty", "Unemployment", "Lower secondary school", "Voice", "Freedom", "Alcohol", "HIV (untreated)", "log(GDP)","GDP"),
+          intercept.bottom = FALSE, 
+          align = TRUE, 
+          se = list(robust_se_ls_gdp_log, robust_se_ls_all_log),
+          omit.stat=c("LL","f"), 
+          star.char = c("+","*","**","***"),
+          star.cutoffs =c(0.1, 0.05, 0.01, 0.001), 
+          notes = c("$+$ p$<$0.1; $^*$ p$<$0.05; $^{**}$ p$<$0.01; $^{***}$ p$<$0.001"),
+          notes.append = F, 
+          model.numbers=T, 
+          no.space=T,
+          label= "tab:ols_ls"
+          )
+```
+Moran index: 
+```{r}
+lm_residual_moran_neighbors(ols_ls_gdp_log, data_2015, country_neighbors, name_true_values = "life_satisfaction")
+```
+```{r}
+lm_residual_moran_neighbors(ols_ls_log, data_2015, country_neighbors, name_true_values = "life_satisfaction")
+```
+
+
+
+
+#### untransformed GDP
+```{r}
+ols_ls <- lm(formula_life_satisfaction_all, data_2015)
+summary(ols_ls)
+```
+
+
+We also obtain the fit for the standardised predictors in order to make them easier to compare:
+
+```{r}
+ols_ls_scaled <- lm(formula_life_satisfaction_all, data_2015 %>% mutate(across(where(is.numeric) & !population & !life_satisfaction,  ~(scale(.) %>% as.vector))))
+summary(ols_ls_scaled)
+
+```
+
+Summary table:
+
+
+```{r}
+robust_se_ls_all <- sqrt(diag(vcovHC(ols_ls, type = "HC3")))
+robust_se_ls_all_scaled <- sqrt(diag(vcovHC(ols_ls_scaled, type = "HC3")))
+stargazer(ols_ls, ols_ls_scaled ,
+          type="text",
+          report = 'vc*', 
+          title = "Ordinary least squares results for life satisfaction using untransformed GDP, predictors in original units (1) and standardised predictors (2)", 
+          #dep.var.caption = "Life satisfaction (0-10 Cantril Scale)", 
+          dep.var.labels = "Life satisfaction (0-10 Cantril Scale)", 
+          #column.labels=c("original units", "standardised predictors"), 
+          covariate.labels = c("Intercept", "Undernourishment", "Obesity", "Drinking water", "Electricity", "Sanitation", "Clean cooking", "Air pollution (particles)", "Air pollution (ozone)", "UHC", "DTP3", "Unmet contraception", "Social support", "Stability", "CBN poverty", "Unemployment", "Lower secondary school", "Voice", "Freedom", "Alcohol", "HIV (untreated)","GDP"),
+          intercept.bottom = FALSE,
+          align = TRUE, 
+          omit.stat=c("LL","f"), 
+          se = list(robust_se_ls_all, robust_se_ls_all_scaled),
+          star.char = c("+","*","**","***"),
+          star.cutoffs =c(0.1, 0.05, 0.01, 0.001), 
+          notes = c("$^+$ p$<$0.1; $^*$ p$<$0.05; $^{**}$ p$<$0.01; $^{***}$ p$<$0.001"),
+          notes.append = F,  
+          model.numbers=T, 
+          no.space=T,
+          label= "tab:ols_ls"
+          )
+```
+Moran's I
+```{r}
+lm_residual_moran_neighbors(ols_ls, data_2015, country_neighbors, name_true_values = "life_satisfaction")
+```
+
+
+diagnostic plots
+```{r}
+plots <- autoplot(ols_ls, which = c(1, 2, 3, 5)) +
+  theme_light() +
+theme(text = element_text(size=12, family="LM Roman 10"))
+# remove titles
+for (i in 1:4) {
+  plots[i] <- plots[i] + ggtitle(element_blank())
+}
+plots
+ggsave(file = "../results/figures/diagnostic_ols_life_satisfaction_all.pdf", arrangeGrob(grobs = plots@plots), width = 160, height = 110, units = "mm", device=cairo_pdf)
+```
+
+
+## F-test
+
+```{r}
+F_test_ls <- waldtest(ols_ls_gdp_log, ols_ls_log, vcov = vcovHC(ols_ls_log, type = "HC3"), test = "F")
+F_test_ls
+```
+Very small p-value, implying that the model including all the need satisfiers indeed improves the predictive power significantly
+
+```{r}
+stargazer(F_test_ls, summary=FALSE, type = "text")
+```
+

@@ -1,0 +1,698 @@
+---
+title: "Reproduce results from 'A good life for all paper' (O'Neill 2018)"
+html_notebook: default
+---
+
+```{r}
+library(readxl)
+library(writexl)
+library(dplyr)
+library(tidyverse)
+library(countrycode)
+library(readr)
+library(stats)
+library(stargazer)
+library(latex2exp)
+library(janitor)
+
+# for Latex fonts: 
+library(extrafont)
+```
+
+# Data preparation
+
+```{r}
+data_social <- read_excel("../data/original_data/supplementary_data_ONeill_2018.xlsx", sheet = "Social") %>% rename(country_name = '...1', energy_access = 'Access to Energy') %>% clean_names() %>% drop_na(life_satisfaction)
+```
+
+find the 109 countries used in the paper 
+definition in the caption of figure 2 in the main text:
+- all 7 biophysical indicators covered
+- at least 10 of the 11 social indicators covered
+
+```{r}
+countries_all_boundaries <- read_excel("../data/original_data/supplementary_data_ONeill_2018.xlsx", sheet = "Biophysical") %>% rename(country_name = '...1') %>% drop_na() %>% select(country_name)
+
+countries_10_thresholds <- 
+  data_social %>% 
+  rowwise() %>% 
+  mutate(n_covered = sum( !is.na(c(life_satisfaction, healthy_life_expect,
+                                                                nutrition, sanitation, income, energy_access, 
+                                                                education, social_support, democratic_quality, 
+                                                                equality, employment))), 
+         n_covered_satisfier = sum( !is.na(c(nutrition, sanitation, income, energy_access, 
+                                                                education, social_support, democratic_quality, 
+                                                                equality, employment)))) %>% 
+  ungroup() %>% filter(n_covered>9) %>% select(country_name, n_covered_satisfier)
+
+countries_109 <- inner_join(countries_all_boundaries, countries_10_thresholds)
+
+data_109 <- inner_join(countries_109, data_social)
+
+```
+
+get minimal life satisfaction and life expectancy as well as log(GDP) from WHR dataset
+
+The minimal values are needed to re-transform the life satisfaction and life expectancy values from the scaled version in the uploaded dataset to absolute values as used for the plots we want to reproduce
+
+
+```{r}
+data_WHR <- 
+  read_excel("../data/original_data/world_happiness_report_2015.xlsx", skip = 2) %>% 
+  rename(country_name = 'country', log_gdp = 'Log GDP per capita') %>% 
+  #inner_join(countries_109, by = 'country_name') %>% 
+  filter(year == 2011) 
+ls_min <- min(data_WHR$`Life Ladder`)
+le_min <- min(data_WHR$`Healthy life expectancy at birth`, na.rm = TRUE)
+
+data_GDP <- data_WHR %>% select(country_name, log_gdp)
+```
+
+-   get absolute values of life satisfaction and life expectancy
+      The normalisation of social indicators is described in the supplementary material section 4:
+
+        "...the social indicators are normalised such that the lowest value for a given indicator is
+        assigned the value of zero, while the social threshold is assigned the value of one. This normalisation
+        procedure preserves the social threshold as an absolute quantity (it is always one, regardless of the
+        data), but allows the differences between countries to be visualised in the “safe and just space”
+        plots. In mathematical terms, the normalised data are given by ynorm = (y − ymin) ÷ (y* − ymin), where y
+        is the social indicator, y* is the social threshold, and ymin is the lowest value for the social indicator."
+        
+      The social threshold for life satisfaction 6.5, the one for healthy life expectancy 65
+
+-   calculate number of achieved need satisfier thresholds per country
+
+-   add average of all need satisfier values
+        
+        (as an alternative way to aggregate the need satisfier values into one number)
+      
+
+-   add log(GDP) as an indicator for general wealth
+
+```{r}
+
+data <- data_109 %>% 
+  rowwise() %>% 
+  mutate(country_name = country_name, 
+         life_satisfaction_abs = life_satisfaction*(6.5-ls_min)+ls_min, 
+        life_expectancy_abs = healthy_life_expect*(65-le_min)+le_min,
+        n_achieved = sum( c(nutrition, sanitation, income, energy_access, 
+                            education, social_support, democratic_quality, 
+                            equality, employment) >= 1, na.rm = TRUE),
+        average_satisfier = sum(c(nutrition, sanitation, income, energy_access, 
+                            education, social_support, democratic_quality, 
+                            equality, employment),na.rm = TRUE)/n_covered_satisfier) %>% 
+  ungroup() %>% 
+  inner_join(select(data_WHR,country_name, log_gdp))
+```
+
+
+
+# Reproduce supplementary figure 1 from O'Neill et al. 2018
+
+## Life expectancy
+
+plot average life expectancy versus number of need satisfiers achieved
+
+... with standard error of estimated mean:
+
+```{r}
+data_msd <- data %>% 
+  group_by(n_achieved) %>% 
+  summarise(mean = mean(life_expectancy_abs), sd = sd(life_expectancy_abs)/sqrt(n()), n = n()) %>% 
+  mutate(upper = mean + sd)
+
+data_msd %>% ggplot(aes(x=n_achieved, y=mean)) + 
+  geom_point()+
+  geom_errorbar(aes(ymin=mean-sd, ymax=mean+sd), position=position_dodge(0.05), width = 0.2) +
+  scale_x_continuous("Number of need satisfiers achieved", 
+                     breaks = c(0,1,2,3,4,5,6,7,8,9), 
+                     minor_breaks =  NULL)   +
+  scale_y_continuous("Healthy life expectancy (years)",
+      breaks = seq(35, 75, 5),
+      #limits = c(2.8,7.9),
+      minor_breaks =  NULL
+      ) +
+  coord_cartesian(ylim = c(38,75)) +
+  theme_light() +
+theme(text = element_text(size=12, family="LM Roman 10"))
+ggsave(file = "../results/figures/reproduce_life_expectancy_standard_error.pdf", dpi = 600, width = 160, height = 120, units = "mm", device = cairo_pdf)
+
+```
+
+
+... with standard deviation of data points:
+
+```{r}
+data_msd <- data %>% 
+  group_by(n_achieved) %>% 
+  summarise(mean = mean(life_expectancy_abs), sd = sd(life_expectancy_abs)) %>% 
+  mutate(upper = mean + sd)
+
+data_msd %>% ggplot(aes(x=n_achieved, y=mean)) + 
+  geom_point()+
+  geom_errorbar(aes(ymin=mean-sd, ymax=mean+sd), position=position_dodge(0.05), width = 0.2) +
+  scale_x_continuous("Number of need satisfiers achieved", 
+                     breaks = c(0,1,2,3,4,5,6,7,8,9), 
+                     minor_breaks =  NULL)   +
+  scale_y_continuous("Healthy life expectancy (years)",
+      breaks = seq(35, 75, 5),
+      #limits = c(2.8,7.9),
+      minor_breaks =  NULL
+      ) +
+  coord_cartesian(ylim = c(38,75)) +
+  theme_light() +
+theme(text = element_text(size=12, family="LM Roman 10"))
+ggsave(file = "../results/figures/reproduce_life_expectancy_standard_dev.pdf", dpi = 600, width = 160, height = 120, units = "mm", device = cairo_pdf)
+
+```
+... standard deviation with data points:
+
+```{r}
+
+
+data %>% ggplot(aes(x=n_achieved, y=life_expectancy_abs)) + 
+  geom_point(shape = 1)+
+ stat_summary(fun.data=mean_sdl, fun.args = list(mult=1), 
+        geom="errorbar", color="black", width=0.2) +
+  stat_summary(fun=mean, geom="point", color="black") +
+  scale_x_continuous("Number of need satisfiers achieved",
+                     breaks = c(0,1,2,3,4,5,6,7,8,9),
+                     minor_breaks =  NULL)   +
+  scale_y_continuous("Healthy life expectancy (years)",
+      breaks = seq(35, 75, 5),
+      #limits = c(2.8,7.9),
+      minor_breaks =  NULL
+      ) +
+  # coord_cartesian(ylim = c(38,75)) +
+  theme_light() +
+theme(text = element_text(size=12, family="LM Roman 10"))
+ggsave(file = "../results/figures/reproduce_life_expectancy_points.pdf", dpi = 600, width = 160, height = 120, units = "mm", device = cairo_pdf)
+
+```
+
+
+... boxplot:
+
+```{r}
+data %>% ggplot(aes(x= as.factor(n_achieved), y = life_expectancy_abs)) +
+  geom_boxplot() +
+  scale_x_discrete("Number of need satisfiers achieved")   +
+  scale_y_continuous("Healthy life expectancy (years)",
+      breaks = seq(35, 75, 5),
+      #limits = c(2.8,7.9),
+      minor_breaks =  NULL
+      ) +
+  coord_cartesian(ylim = c(38,75)) +
+  theme_light() +
+theme(text = element_text(size=12, family="LM Roman 10"))
+ggsave(file = "../results/figures/reproduce_life_expectancy_boxplot.pdf", dpi = 600, width = 160, height = 120, units = "mm", device = cairo_pdf)
+
+```
+
+
+
+## Life satisfaction
+
+plot average life satisfaction versus number of need satisfiers achieved
+
+... with standard error of estimated mean:
+
+
+```{r}
+data_msd <- data %>% 
+  group_by(n_achieved) %>% 
+  summarise(mean = mean(life_satisfaction_abs), sd = sd(life_satisfaction_abs)/sqrt(n()), n = n()) %>% 
+  mutate(upper = mean + sd)
+
+data_msd %>% ggplot(aes(x=n_achieved, y=mean)) + 
+  geom_point()+
+  geom_errorbar(aes(ymin=mean-sd, ymax=mean+sd), position=position_dodge(0.05), width = 0.2) +
+  scale_x_continuous("Number of need satisfiers achieved", 
+                     breaks = c(0,1,2,3,4,5,6,7,8,9), 
+                     minor_breaks =  NULL)   +
+  scale_y_continuous("Life satisfaction (0-10)", 
+                     breaks = c(2.5,3.0,3.5,4.0, 4.5,5.0,5.5,6.0,6.5,7.0, 7.5,8.0),
+                     minor_breaks =  NULL) +
+  coord_cartesian(ylim = c(2.6,7.9)) +
+  theme_light() +
+theme(text = element_text(size=12, family="LM Roman 10"))
+ggsave(file = "../results/figures/reproduce_life_satisfaction_standard_error.pdf", dpi = 600, width = 160, height = 120, units = "mm", device = cairo_pdf)
+```
+
+
+... with standard deviation of data points:
+
+```{r}
+data_msd <- data %>% 
+  group_by(n_achieved) %>% 
+  summarise(mean = mean(life_satisfaction_abs), sd = sd(life_satisfaction_abs)) %>% 
+  mutate(upper = mean + sd)
+
+data_msd %>% ggplot(aes(x=n_achieved, y=mean)) + 
+  geom_point()+
+  geom_errorbar(aes(ymin=mean-sd, ymax=mean+sd), position=position_dodge(0.05), width = 0.2) +
+  scale_x_continuous("Number of need satisfiers achieved", 
+                     breaks = c(0,1,2,3,4,5,6,7,8,9), 
+                     minor_breaks =  NULL)   +
+  scale_y_continuous("Life satisfaction (0-10)", 
+                     breaks = c(2.5,3.0,3.5,4.0, 4.5,5.0,5.5,6.0,6.5,7.0, 7.5,8.0),
+                     minor_breaks =  NULL) +
+  coord_cartesian(ylim = c(2.6,7.9)) +
+  theme_light() +
+theme(text = element_text(size=12, family="LM Roman 10"))
+ggsave(file = "../results/figures/reproduce_life_satisfaction_standard_dev.pdf", dpi = 600, width = 160, height = 120, units = "mm", device = cairo_pdf)
+```
+
+... standard deviation with data points:
+
+```{r}
+
+
+data %>% ggplot(aes(x=n_achieved, y=life_satisfaction_abs)) + 
+  geom_point(shape=1)+
+ stat_summary(fun.data=mean_sdl, fun.args = list(mult=1), 
+        geom="errorbar", color="black", width=0.2) +
+  stat_summary(fun=mean, geom="point", color="black") +
+  scale_x_continuous("Number of need satisfiers achieved", 
+                     breaks = c(0,1,2,3,4,5,6,7,8,9), 
+                     minor_breaks =  NULL)   +
+  scale_y_continuous("Life satisfaction (0-10)", 
+                     breaks = c(2.5,3.0,3.5,4.0, 4.5,5.0,5.5,6.0,6.5,7.0, 7.5,8.0),
+                     minor_breaks =  NULL) +
+  coord_cartesian(ylim = c(2.6,7.9)) +
+  theme_light() +
+theme(text = element_text(size=12, family="LM Roman 10"))
+ggsave(file = "../results/figures/reproduce_life_satisfaction_points.pdf", dpi = 600, width = 160, height = 120, units = "mm", device = cairo_pdf)
+
+```
+
+... boxplot:
+
+```{r}
+data %>% ggplot(aes(x= as.factor(n_achieved), y = life_satisfaction_abs)) +
+  geom_boxplot() +
+  scale_x_discrete("Number of need satisfiers achieved")   +
+  scale_y_continuous("Life satisfaction (0-10)",
+      breaks = c(2.5,3.0,3.5,4.0, 4.5,5.0,5.5,6.0,6.5,7.0, 7.5,8.0),
+      #limits = c(2.8,7.9),
+      minor_breaks =  NULL
+      ) +
+  coord_cartesian(ylim = c(2.6,7.9)) +
+  theme_light() +
+theme(text = element_text(size=12, family="LM Roman 10"))
+ggsave(file = "../results/figures/reproduce_life_satisfaction_boxplot.pdf", dpi = 600, width = 160, height = 120, units = "mm", device = cairo_pdf)
+```
+
+make plot together with means from original study to compare:
+
+```{r}
+original_plot_data <- read_excel("../data/original_data/original_plot_ONeill_2018_data.xlsx")
+```
+
+```{r}
+data_msd <- data %>% 
+  group_by(n_achieved) %>% 
+  summarise(mean = mean(life_satisfaction_abs), sd = sd(life_satisfaction_abs)/sqrt(n()), n = n()) %>% 
+  mutate(upper = mean + sd)
+
+data_msd %>% ggplot(aes(x=n_achieved, y=mean)) + 
+  geom_point()+
+  geom_errorbar(aes(ymin=mean-sd, ymax=mean+sd), position=position_dodge(0.05), width = 0.2) +
+  geom_point(data = original_plot_data, aes(x=n_achieved, y=mean), color = "red") +
+  scale_x_continuous("Number of need satisfiers achieved", 
+                     breaks = c(0,1,2,3,4,5,6,7,8,9), 
+                     minor_breaks =  NULL)   +
+  scale_y_continuous("Life satisfaction (0-10)", 
+                     breaks = c(2.5,3.0,3.5,4.0, 4.5,5.0,5.5,6.0,6.5,7.0, 7.5,8.0),
+                     minor_breaks =  NULL) +
+  coord_cartesian(ylim = c(2.6,7.9)) +
+  theme_light() +
+theme(text = element_text(size=12, family="LM Roman 10"))
+ggsave(file = "../results/figures/reproduce_life_satisfaction_standard_error_compare_original.pdf", dpi = 600, width = 160, height = 120, units = "mm", device = cairo_pdf)
+```
+does it add to zero?
+```{r}
+(data_msd$mean - (original_plot_data %>% drop_na() %>% pull(mean))) %>% sum()
+```
+
+
+
+
+
+
+# Ordinary least squares regressions
+
+## life expectancy
+```{r}
+le_1 <- lm(life_expectancy_abs ~ n_achieved,data = data)
+
+summary(le_1)
+```
+
+```{r}
+le_2 <- lm(life_expectancy_abs ~ log(n_achieved +1),data = data)
+
+summary(le_2)
+```
+
+
+
+when taking into account the fact that the number of achieved thresholds is an ordinal indicator, the fit gets better than that of GDP:
+```{r}
+summary(lm(life_expectancy_abs ~ as.factor(n_achieved),data = data))
+```
+
+```{r}
+le_3 <- lm(life_expectancy_abs ~ log_gdp,data = data)
+
+summary(le_3)
+```
+averaged satisfiers:
+```{r}
+le_4 <- lm(life_expectancy_abs ~ average_satisfier,data = data)
+
+summary(le_4)
+```
+stargazer summary:
+
+```{r}
+
+
+stargazer(le_3, le_1, le_2, le_4,         
+          report = 'vc*',
+          #type = "text",
+          title = "Comparison of GDP, number of satisfiers achieved, and average satisfier levels as predictors for healthy life expectancy", 
+          #dep.var.caption = "Life satisfaction (0-10 Cantril Scale)", 
+          dep.var.labels = "Healthy Healthy life expectancy (years)", 
+          #column.labels=c(1,2,3,4), 
+          covariate.labels = c("Intercept", "log(GDP)", "NNSA", "log(NNSA + 1)", "ANS"), 
+          align = TRUE, 
+           omit.stat=c("LL","f"), 
+          star.char = c("+","*","**","***"),
+          star.cutoffs =c(0.1, 0.05, 0.01, 0.001), 
+          notes = c("$+$ p$<$0.1; $^*$ p$<$0.05; $^{**}$ p$<$0.01; $^{***}$ p$<$0.001"),
+          notes.append = F,  
+          model.numbers=T, 
+          no.space=T,
+          intercept.bottom = FALSE
+          )
+```
+
+
+## life satisfaction
+
+... as "continuous" variable
+
+```{r}
+ls_1 <- lm(life_satisfaction_abs ~ n_achieved, data = data)
+summary(ls_1)
+```
+
+```{r}
+ls_2 <- lm(life_satisfaction_abs ~ log(n_achieved + 1), data = data)
+summary(ls_2)
+```
+
+
+
+... as factor variable
+
+```{r}
+ls_factor <- lm(life_satisfaction_abs ~ as.factor(n_achieved), data = data)
+summary(ls_factor)
+```
+
+... log(GDP) alone
+
+```{r}
+ls_3 <-  lm(life_satisfaction_abs ~log_gdp, data = data)
+summary(ls_3)
+```
+
+... averaged satisfier value
+```{r}
+ls_4 <- lm(life_satisfaction_abs ~ average_satisfier, data = data)
+summary(ls_4)
+
+```
+stargazer summary:
+
+```{r}
+
+
+stargazer(ls_3, ls_1, ls_2, ls_4,
+          report = 'vc*',
+          title = "Comparison of GDP, number of satisfiers achieved, and average satisfier levels as predictors for life satisfaction", 
+          #dep.var.caption = "Life satisfaction (0-10 Cantril Scale)", 
+          dep.var.labels = "Life satisfaction (0-10 Cantril Scale)", 
+          #column.labels=c(1,2,3,4), 
+          covariate.labels = c("Intercept", "log(GDP)", "NNSA", "log(NNSA + 1)", "ANS"),
+          align = TRUE, 
+          omit.stat=c("LL","f"), 
+          star.char = c("+","*","**","***"),
+          star.cutoffs =c(0.1, 0.05, 0.01, 0.001), 
+          notes = c("$+$ p$<$0.1; $^*$ p$<$0.05; $^{**}$ p$<$0.01; $^{***}$ p$<$0.001"),
+          notes.append = F,  
+          model.numbers=T, 
+          no.space=T,
+          intercept.bottom = FALSE
+          )
+```
+
+
+
+
+
+# Further exploration of data 
+## Regress number of satisfied needs on GDP
+
+```{r}
+summary(lm(n_achieved ~ log_gdp,data = data))
+```
+
+```{r}
+data %>% ggplot(aes(x=log_gdp, y=n_achieved)) + geom_point(aes(color=`country_name`))  + geom_smooth(method='lm', formula= y ~ x)  + guides(color="none")
+```
+
+## multiple regression
+
+### multiple regression on all need satisfiers as continous variables
+
+life satisfaction:
+```{r}
+linear <- lm(life_satisfaction_abs ~ log(nutrition) + sanitation + income + energy_access + education + social_support + democratic_quality + equality + employment, data = data)
+summary(linear)
+```
+life expectancy:
+
+```{r}
+summary(lm(life_expectancy_abs ~ nutrition + sanitation + income + energy_access + education + social_support + democratic_quality + equality + employment, data = data))
+```
+
+
+
+### multiple regression on all need satisfiers as bivariate (threshold achieved/not achieved) variables
+create dataset dummy for each satisfier telling us whether the threshold is achieved
+
+```{r}
+data_dummy <- data %>% transmute(country_name = country_name, life_satisfaction_abs = life_satisfaction_abs, life_expectancy_abs = life_expectancy_abs, n_achieved = n_achieved, across(c(nutrition, sanitation, income, energy_access, 
+                            education, social_support, democratic_quality, 
+                            equality, employment), ~ . >= 1))
+#write_xlsx(data_dummy, "achieved_satisfier.xlsx")
+```
+
+
+life satisfaction:
+```{r}
+summary(lm(life_satisfaction_abs ~ nutrition + sanitation + income + energy_access + education + social_support + democratic_quality + equality + employment, data = data_dummy))
+```
+life expectancy: 
+```{r}
+summary(lm(life_expectancy_abs ~ nutrition + sanitation + income + energy_access + education + social_support + democratic_quality + equality + employment, data = data_dummy))
+```
+
+
+
+
+### controlling for GDP
+
+life satisfaction:
+surprising effects on some of the coefficients!
+
+```{r}
+linear <- lm(life_satisfaction_abs ~ log(nutrition) + sanitation + income + energy_access + education + social_support + democratic_quality + equality + employment + log_gdp, data = data)
+summary(linear)
+```
+life expectancy:
+```{r}
+linear <- lm(life_expectancy_abs ~ log(nutrition) + sanitation + income + energy_access + education + social_support + democratic_quality + equality + employment + log_gdp, data = data)
+summary(linear)
+```
+
+
+## check single predictors, just controlling for GDP
+
+NUTRITION
+
+```{r}
+summary(lm(life_satisfaction_abs ~ log(nutrition) + log_gdp, data))
+```
+
+SANITATION
+
+```{r}
+summary(lm(life_satisfaction_abs ~ sanitation, data))
+```
+
+```{r}
+summary(lm(life_satisfaction_abs ~ sanitation + log_gdp, data))
+```
+
+INCOME
+
+```{r}
+summary(lm(life_satisfaction_abs ~ income + log_gdp, data))
+```
+
+ENERGY ACCESS
+
+```{r}
+summary(lm(life_satisfaction_abs ~ energy_access + log_gdp, data))
+```
+
+EDUCATION
+
+```{r}
+summary(lm(life_satisfaction_abs ~ education + log_gdp, data))
+```
+
+SOCIAL SUPPORT
+
+```{r}
+summary(lm(life_satisfaction_abs ~ social_support + log_gdp, data))
+```
+
+DEMOCRATIC QUALITY
+
+```{r}
+summary(lm(life_satisfaction_abs ~ democratic_quality + log_gdp, data))
+```
+
+EQUALITY
+
+```{r}
+summary(lm(life_satisfaction_abs ~ equality, data))
+```
+
+```{r}
+summary(lm(life_satisfaction_abs ~ equality + log_gdp, data))
+```
+
+```{r}
+interaction_eq_GDP <- lm(life_satisfaction_abs ~ log_gdp * equality, data)
+summary(interaction_eq_GDP)
+```
+
+```{r}
+eff_start <- function(x) coef(interaction_eq_GDP)[2] + coef(interaction_eq_GDP)[4] * x
+se_eff_start <- function(x) sqrt(vcov(interaction_eq_GDP)[2, 2] + 
+                            x^2 * vcov(interaction_eq_GDP)[4, 4] + 
+                            2 * x * vcov(interaction_eq_GDP)[2, 4])
+alpha = 0.05
+#significance_border <- uniroot(function(x) eff_start(x) + qnorm(alpha/2) * se_eff_start(x), interval = c(0,1))$root
+data %>% 
+  ggplot(aes(x=equality, y = eff_start(equality))) + 
+  stat_function(fun = eff_start, size=1) +
+  stat_function(fun = function(x) eff_start(x) - qnorm(alpha/2) * se_eff_start(x), linetype = 'dashed') +
+  stat_function(fun = function(x) eff_start(x) + qnorm(alpha/2) * se_eff_start(x), linetype = 'dashed') +
+ # geom_rect(aes(xmax = significance_border, xmin = -Inf , ymin = -Inf, ymax = Inf), 
+   #         fill = "grey", alpha = 0.01) +
+  labs( x = TeX("equality"), y = "Effect size of log(GDP)") +
+  theme_light()
+#ggsave(file = "../results/figures/effect_size_interaction.pdf", dpi = 600, width = 160, height = 120, units = "mm", device = cairo_pdf)
+
+```
+
+```{r}
+eff_start <- function(x) coef(interaction_eq_GDP)[3] + coef(interaction_eq_GDP)[4] * x
+se_eff_start <- function(x) sqrt(vcov(interaction_eq_GDP)[3, 3] + 
+                            x^2 * vcov(interaction_eq_GDP)[4, 4] + 
+                            2 * x * vcov(interaction_eq_GDP)[3, 4])
+alpha = 0.05
+#significance_border <- uniroot(function(x) eff_start(x) + qnorm(alpha/2) * se_eff_start(x), interval = c(0,1))$root
+data %>% 
+  ggplot(aes(x=log_gdp, y = eff_start(log_gdp))) + 
+  stat_function(fun = eff_start, size=1) +
+  stat_function(fun = function(x) eff_start(x) - qnorm(alpha/2) * se_eff_start(x), linetype = 'dashed') +
+  stat_function(fun = function(x) eff_start(x) + qnorm(alpha/2) * se_eff_start(x), linetype = 'dashed') +
+ # geom_rect(aes(xmax = significance_border, xmin = -Inf , ymin = -Inf, ymax = Inf), 
+   #         fill = "grey", alpha = 0.01) +
+  labs( x = TeX("log(GDP)"), y = "Effect size of equality") +
+  theme_light()
+#ggsave(file = "../results/figures/effect_size_interaction.pdf", dpi = 600, width = 160, height = 120, units = "mm", device = cairo_pdf)
+
+```
+
+with fixed intercept
+
+```{r}
+interaction_eq_GDP_fix_intercept <- lm(life_satisfaction_abs ~ 0 + log_gdp*equality, data)
+summary(interaction_eq_GDP_fix_intercept)
+```
+
+```{r}
+eff_start <- function(x) coef(interaction_eq_GDP_fix_intercept)[1] + coef(interaction_eq_GDP_fix_intercept)[3] * x
+se_eff_start <- function(x) sqrt(vcov(interaction_eq_GDP_fix_intercept)[1, 1] + 
+                            x^2 * vcov(interaction_eq_GDP_fix_intercept)[3, 3] + 
+                            2 * x * vcov(interaction_eq_GDP_fix_intercept)[1, 3])
+alpha = 0.05
+#significance_border <- uniroot(function(x) eff_start(x) + qnorm(alpha/2) * se_eff_start(x), interval = c(0,1))$root
+data %>% 
+  ggplot(aes(x=equality, y = eff_start(equality))) + 
+  stat_function(fun = eff_start, size=1) +
+  stat_function(fun = function(x) eff_start(x) - qnorm(alpha/2) * se_eff_start(x), linetype = 'dashed') +
+  stat_function(fun = function(x) eff_start(x) + qnorm(alpha/2) * se_eff_start(x), linetype = 'dashed') +
+ # geom_rect(aes(xmax = significance_border, xmin = -Inf , ymin = -Inf, ymax = Inf), 
+   #         fill = "grey", alpha = 0.01) +
+  labs( x = TeX("equality"), y = "Effect size of log(GDP)") +
+  theme_light()
+#ggsave(file = "../results/figures/effect_size_interaction.pdf", dpi = 600, width = 160, height = 120, units = "mm", device = cairo_pdf)
+
+```
+
+```{r}
+eff_start <- function(x) coef(interaction_eq_GDP_fix_intercept)[2] + coef(interaction_eq_GDP_fix_intercept)[3] * x
+se_eff_start <- function(x) sqrt(vcov(interaction_eq_GDP_fix_intercept)[2, 2] + 
+                            x^2 * vcov(interaction_eq_GDP_fix_intercept)[3, 3] + 
+                            2 * x * vcov(interaction_eq_GDP_fix_intercept)[2, 3])
+alpha = 0.05
+significance_border <- uniroot(function(x) eff_start(x) - qnorm(alpha/2) * se_eff_start(x), interval = c(8,9))$root
+data %>% 
+  ggplot(aes(x=log_gdp, y = eff_start(log_gdp))) + 
+  stat_function(fun = eff_start, size=1) +
+  stat_function(fun = function(x) eff_start(x) - qnorm(alpha/2) * se_eff_start(x), linetype = 'dashed') +
+  stat_function(fun = function(x) eff_start(x) + qnorm(alpha/2) * se_eff_start(x), linetype = 'dashed') +
+  geom_rect(aes(xmin = significance_border, xmax = Inf , ymin = -Inf, ymax = Inf), 
+          fill = "grey", alpha = 0.01) +
+  labs( x = TeX("log_GDP"), y = "Effect size of equality") +
+  theme_light()
+#ggsave(file = "../results/figures/effect_size_interaction.pdf", dpi = 600, width = 160, height = 120, units = "mm", device = cairo_pdf)
+
+```
+
+EMPLOYMENT
+
+```{r}
+summary(lm(life_satisfaction_abs ~ employment + log_gdp, data))
+```
+
+all promising predictors
+
+```{r}
+summary(lm(life_satisfaction_abs ~ social_support + democratic_quality + employment + equality, data))
+```
+
+```{r}
+summary(lm(life_satisfaction_abs ~ social_support + democratic_quality + employment + equality + log_gdp, data))
+```

@@ -1,0 +1,267 @@
+---
+title: "R Notebook"
+html_notebook: default
+---
+
+```{r}
+library(readxl)
+library(writexl)
+library(dplyr)
+library(tidyverse)
+library(caret)
+library(countrycode)
+library(readr)
+library(stats)
+library(stargazer)
+library(latex2exp)
+library(janitor)
+library(viridis)
+library(factoextra)
+library(modelr)
+library(glmnet)
+library(tidymodels)
+library(mgcv)
+library(sfsmisc)
+library(earth)
+library(pdp)
+library(rpart.plot)
+library(ranger)
+library(rlang)
+
+tidymodels_prefer()
+
+source("../utils/step_select_p_value.R")
+source("../utils/step_select_p_value_iterative.R")
+source("../utils/step_select_lasso.R")
+source("../utils/step_select_leaps.R")
+```
+
+```{r}
+data_2015 <- 
+  read_xlsx("../data/dataset_need_satisfiers_2015.xlsx") %>% 
+  select(-undernourishment) %>% 
+  drop_na()
+
+k_folds <- vfold_cv(data_2015, v = 5, repeats = 5)
+
+lin_spec <- 
+    linear_reg() %>% 
+    set_engine("lm")
+
+formula_all <- 
+  life_expect ~ 
+             cbn_poverty +
+             obesity +
+        
+             electricity +
+             sanitation_basic +
+             clean_cooking_gbd +
+
+             air_pollution_particles +
+             air_pollution_ozone +
+
+             physicians +
+             nurses_midwifes +
+             unmet_contraception +
+             antenatal_care +
+             ART +
+             tuberculosis_treatment +
+             dtp3 +
+             measles_vac +
+             health_expenditure +
+             uhc_who +
+
+             unemployment_ilo +
+
+             social_support +
+             freedom +
+        
+             homicide_rate +
+             voice +
+             corruption_index +
+             stability +
+
+             alcohol +
+             HIV_unaids +
+        
+             gdp
+
+```
+
+
+
+# p-value variable selection
+## simple fit
+```{r}
+rec_sel_p_value <- 
+  recipe(formula = formula_all, data = data_2015) %>% 
+  step_select_p_value(all_predictors(), outcome = "life_expect", threshold = 0.05, keep_always = c("ART","HIV_unaids")) %>% 
+  step_interact(terms = ~ ART:HIV_unaids)
+```
+
+ 
+```{r}
+
+
+lin_sel_p_value_workflow <- 
+  workflow() %>%
+  add_recipe(rec_sel_p_value) %>% 
+  add_model(lin_spec)
+
+fit_lin_sel_p_value <- lin_sel_p_value_workflow %>% fit(data = data_2015)
+
+tidy(fit_lin_sel_p_value) %>% arrange(p.value)
+```
+## tune functionality 
+```{r}
+rec_sel_p_value <- 
+  recipe(formula = formula_all, data = data_2015) %>% 
+  step_select_p_value(all_predictors(), outcome = "life_expect", threshold = tune(), keep_always = c("ART","HIV_unaids")) %>% 
+  step_interact(terms = ~ ART:HIV_unaids)
+```
+
+```{r}
+
+
+lin_sel_p_value_workflow <- 
+  workflow() %>%
+  add_recipe(rec_sel_p_value) %>% 
+  add_model(lin_spec)
+
+tune_lin_sel_p_value <- 
+  lin_sel_p_value_workflow %>% 
+  tune_grid(resamples = k_folds, 
+            grid = grid_regular(range_set(threshold(), c(0,0.1)), levels = 3))
+
+tune_lin_sel_p_value %>% collect_metrics()
+
+```
+
+# p-value iterative variable selection
+## simple fit
+
+```{r}
+rec_sel_p_value <- 
+  recipe(formula = formula_all, data = data_2015) %>% 
+  step_select_p_value_iterative(all_predictors(), outcome = "life_expect", threshold = 0, keep_always = c("ART","HIV_unaids")) %>% 
+  step_interact(terms = ~ ART:HIV_unaids)
+```
+
+ 
+```{r}
+
+
+lin_sel_p_value_workflow <- 
+  workflow() %>%
+  add_recipe(rec_sel_p_value) %>% 
+  add_model(lin_spec)
+
+fit_lin_sel_p_value <- lin_sel_p_value_workflow %>% fit(data = data_2015)
+
+tidy(fit_lin_sel_p_value) %>% arrange(p.value)
+``` 
+## tune functionality
+```{r}
+rec_sel_p_value <- 
+  recipe(formula = formula_all, data = data_2015) %>% 
+  step_select_p_value_iterative(all_predictors(), outcome = "life_expect", threshold = tune(), keep_always = c("ART","HIV_unaids")) %>% 
+  step_interact(terms = ~ ART:HIV_unaids)
+```
+
+ 
+```{r}
+
+
+lin_sel_p_value_workflow <- 
+  workflow() %>%
+  add_recipe(rec_sel_p_value) %>% 
+  add_model(lin_spec)
+
+tune_lin_sel_p_value <- 
+  lin_sel_p_value_workflow %>% 
+  tune_grid(resamples = k_folds, 
+            grid = grid_regular(range_set(threshold(), c(0,0.1)), levels = 3))
+
+tune_lin_sel_p_value %>% collect_metrics()
+
+```
+
+# lasso variable selection
+## simple fit
+
+```{r}
+rec_sel_lasso <- 
+  recipe(formula = formula_all, data = data_2015) %>% 
+  step_select_lasso(all_predictors(), outcome = "life_expect", penalty = 1, keep_always = c("ART","HIV_unaids")) %>% 
+  step_interact(terms = ~ ART:HIV_unaids)
+```
+
+ 
+```{r}
+
+
+lin_sel_lasso_workflow <- 
+  workflow() %>%
+  add_recipe(rec_sel_lasso) %>% 
+  add_model(lin_spec)
+
+fit_lin_sel_lasso <- lin_sel_lasso_workflow %>% fit(data = data_2015)
+
+tidy(fit_lin_sel_lasso) %>% arrange(p.value)
+``` 
+
+
+
+## tune functionality
+```{r}
+rec_sel_lasso <- 
+  recipe(formula = formula_all, data = data_2015) %>% 
+  step_select_lasso(all_predictors(), outcome = "life_expect", penalty = tune(), keep_always = c("ART","HIV_unaids")) %>% 
+  step_interact(terms = ~ ART:HIV_unaids)
+```
+
+ 
+```{r}
+
+
+lin_sel_lasso_workflow <- 
+  workflow() %>%
+  add_recipe(rec_sel_lasso) %>% 
+  add_model(lin_spec)
+
+tune_lin_sel_lasso <- 
+  lin_sel_lasso_workflow %>% 
+  tune_grid(resamples = k_folds, 
+            grid = grid_regular(range_set(penalty(), c(-1,0)), levels = 3))
+
+tune_lin_sel_lasso %>% collect_metrics()
+
+```
+
+# leaps variable selection
+
+```{r}
+rec_sel_leaps <- 
+  recipe(formula = formula_all, data = data_2015) %>% 
+  step_select_leaps(all_predictors(), outcome = "life_expect", keep_always = c("ART","HIV_unaids")) %>% 
+  step_interact(terms = ~ ART:HIV_unaids) 
+```
+
+ 
+```{r}
+
+
+lin_sel_leaps_workflow <- 
+  workflow() %>%
+  add_recipe(rec_sel_leaps) %>% 
+  add_model(lin_spec)
+
+fit_lin_sel_leaps <- lin_sel_leaps_workflow %>% fit(data = data_2015)
+
+tidy(fit_lin_sel_leaps) %>% arrange(p.value)
+``` 
+
+
+
+
+

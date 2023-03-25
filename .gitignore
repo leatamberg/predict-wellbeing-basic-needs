@@ -37,3 +37,11 @@ vignettes/*.pdf
 
 # R Environment Variables
 .Renviron
+
+# Too fat data
+data/IHME_GBD_2019_CONTRACEPTIVE_PREVALENCE_1990_2019_DATA_ALL_WOMEN_Y2022M07D23.CSV
+
+
+*.html
+*.html
+.RDataTmp

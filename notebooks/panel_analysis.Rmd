@@ -1,0 +1,1235 @@
+---
+title: "Panel analysis"
+  html_document:
+    df_print: paged
+    toc: true
+    toc_float: true
+---
+packages
+```{r, warning = FALSE, message=FALSE}
+library(readxl)
+library(writexl)
+library(dplyr)
+library(tidyverse)
+library(caret)
+library(countrycode)
+library(readr)
+library(stats)
+library(stargazer)
+library(latex2exp)
+library(janitor)
+library(viridis)
+library(factoextra)
+library(modelr)
+library(glmnet)
+library(tidymodels)
+library(mgcv)
+library(sfsmisc)
+library(earth)
+library(pdp)
+library(rpart.plot)
+library(ranger)
+library(rlang)
+library(leaps)
+library(rPref)
+library(plm)
+library(imputeTS)
+library(lme4)
+library(parameters)
+
+tidymodels_prefer()
+
+# for Latex fonts: 
+library(extrafont)
+
+# function for clustered standard errors
+ clse = function(reg) { 
+    # index(reg, "id") returns the id or entity variable vector 
+    G = length(unique(index(reg,"id"))) # number of clusters (in our case countries)
+    dfa = (G/(G - 1))   # note Bluhm multiplies this by finite-sample df adjustment
+    rob = sqrt(diag(dfa*vcovHC(reg, method="arellano", type = "HC3", 
+                               cluster = "group")))
+    # arellano for both heteroscedasticity and serial correlation, HC3 gives you nice heteroscedasticity robustness
+    return(rob)
+  }
+```
+
+
+```{r}
+data_all <- read_excel("../data/dataset_need_satisfiers_all_years.xlsx", 
+    col_types = c("text", "text", "text", "text", 
+        "numeric", "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric",
+        "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric",
+        "numeric", "numeric", "numeric",
+        "numeric", "numeric", "numeric",
+        "numeric", "numeric","numeric"))
+```
+
+# Life expectancy
+## Build dataset
+
+```{r}
+
+data_panel_life_expect_raw <- 
+  data_all %>%
+  group_by(country_name) %>% 
+  arrange(year) %>% 
+  ungroup() %>% 
+  filter(year %in% 2000:2020) %>% 
+  select(country_name,
+         country_code,
+         continent,
+         region,
+         population,
+         year,
+         
+         life_expect,
+         
+         undernourishment,
+         obesity,
+         
+         drinking_water_basic,         
+        
+         electricity,
+         sanitation_basic,
+
+         clean_cooking_gbd,
+         air_pollution_particles,
+         air_pollution_ozone,
+
+         uhc_who,
+         dtp3,
+
+         unmet_contraception,
+         
+         #social_support,
+
+         stability,         
+
+         #cbn_poverty,
+         unemployment_ilo,
+
+         lower_secondary_school,
+
+         voice,
+ 
+         #freedom,
+
+         alcohol,
+         HIV_unaids,
+         ART,
+         gdp) 
+```
+
+handling of missing values
+- linear interpolation of country time series 
+```{r}
+my_na_interpolation <- function(x){na_interpolation(x, rule = 1)}
+
+data_panel_life_expect_interpolated <- data_panel_life_expect_raw %>% 
+group_by(country_name) %>% 
+  arrange(year) %>% 
+  mutate(
+    across(.cols = where(is.numeric),
+           ~ possibly(my_na_interpolation, otherwise =NA)(.x))) %>% 
+  ungroup() %>% 
+  drop_na(life_expect)
+
+# check number of na values per country and predictor
+number_samples_per_country <- data_panel_life_expect_interpolated %>% group_by(country_name) %>% summarise(across(-c(year), ~ sum(!is.na(.), na.rm = TRUE)))
+
+# kick out countries that have more than three predictors completely missing
+countries_take <- number_samples_per_country %>% rowwise() %>%
+  mutate(across(where(is.numeric), ~. == 0)) %>%
+  mutate(number_all_na = sum(rowSums(across(-c(country_name))))) %>%
+  filter(number_all_na<=3)
+
+
+
+```
+
+- median imputation of HIV and ART for countries having no data at all
+```{r}
+data_panel_life_expect_median_imputation <- 
+  data_panel_life_expect_interpolated %>% 
+  #filter(year == 2001, country_name %in% c("Germany", "France", "Netherlands", "Switzerland")) %>% 
+  filter(country_name %in% countries_take[["country_name"]]) %>% 
+  inner_join(number_samples_per_country, by = "country_name", suffix = c("", ".n")) %>% 
+  group_by(year,region) %>%
+  mutate(ART = ifelse(ART.n == 0,
+                         median(ART, na.rm = TRUE),ART),
+         HIV_unaids = ifelse(is.na(HIV_unaids),
+                        median(HIV_unaids, na.rm = TRUE), HIV_unaids)
+         )%>%
+  ungroup() %>%
+  rowwise() %>% 
+  mutate(ART = ifelse(region == "Northern America" && ART.n == 0,
+                      ART[country_name == "Germany"], # using the median of western European countries
+                      ART),
+         HIV_unaids = ifelse(region == "Northern America" && HIV_unaids.n == 0,
+                      HIV_unaids[country_name == "Germany"], # using the median of western European countries
+                      HIV_unaids)
+         ) %>%
+  ungroup() %>% 
+  mutate(HIV_unaids_untreated = HIV_unaids*(100-ART)/100) #%>% drop_na()
+```
+
+```{r}
+number_samples <- data_panel_life_expect_median_imputation %>% group_by(year) %>% summarise(across(-c(country_name), ~ sum(!is.na(.), na.rm = TRUE)))
+
+```
+
+
+final selection, logging of GDP
+```{r}
+start = 2001
+end = 2016
+
+
+data_panel_life_expect_selection <- 
+  data_panel_life_expect_median_imputation %>% 
+  select(country_name:gdp, HIV_unaids_untreated) %>% 
+  select(-c(HIV_unaids, ART)) %>% 
+  filter(year %in% start:end) %>% 
+  drop_na() %>%
+  group_by(country_name) %>%
+  filter(n()==end-start+1) %>%
+  ungroup() %>%
+  mutate(gdp = log(gdp))
+  #across(where(is.numeric) & !year & !population,  ~(scale(.) %>% as.vector))) # to scale the data
+```
+
+check number of values per year
+```{r}
+number_samples_final <- data_panel_life_expect_selection %>% group_by(year) %>% summarise(across(-c(country_name), ~ sum(!is.na(.), na.rm = TRUE)))
+
+```
+
+
+composite indicator for highly correlated safe home predictors
+```{r}
+data_panel_life_expect <- 
+  data_panel_life_expect_selection %>% 
+  #mutate(across(c(electricity, drinking_water_basic, sanitation_basic, clean_cooking_gbd), .fns = list(scale = ~(scale(.) %>% as.vector)), names = "{.col}_{.fn}")) %>% 
+  rowwise() %>% 
+  mutate(composite_safe_home = mean(electricity, drinking_water_basic, sanitation_basic, clean_cooking_gbd))
+```
+
+## All predictors
+
+### formula
+```{r}
+formula_le <- life_expect ~
+          undernourishment +
+         obesity +
+         
+         drinking_water_basic +         
+        
+         electricity +
+         sanitation_basic +
+
+         clean_cooking_gbd +
+         air_pollution_particles +
+         air_pollution_ozone +
+
+         uhc_who +
+         dtp3 +
+
+         unmet_contraception +
+         
+         #social_support +
+
+         stability +         
+
+         #cbn_poverty +
+         unemployment_ilo +
+
+         lower_secondary_school +
+
+         voice +
+ 
+         #freedom +
+
+         alcohol +
+         HIV_unaids_untreated +
+         gdp
+``` 
+
+
+
+### Fixed effects models
+
+within estimator, individual effects
+```{r}
+model_le_within_individual <- plm(formula_le, 
+                   data = data_panel_life_expect,
+                    index = c("country_name", "year"), 
+                    effect = "individual", model = "within")
+```
+
+within estimator, time effects
+```{r}
+model_le_within_time <- plm(formula_le, 
+                   data = data_panel_life_expect,
+                    index = c("country_name", "year"), 
+                    effect = "time", model = "within")
+```
+
+within estimator, individual and time effects
+```{r}
+model_le_within_time_individual <- plm(formula_le, 
+                   data = data_panel_life_expect,
+                    index = c("country_name", "year"), 
+                    effect = "twoways", model = "within")
+
+
+```
+
+pooled
+```{r}
+model_le_pooled <- plm(formula_le, 
+                   data = data_panel_life_expect, 
+                    index = c("country_name", "year"), 
+                    effect = "individual", model = "pooling")
+```
+
+
+
+### F-tests
+test for individual effects by comparing within estimator and pooled regression:
+```{r}
+pFtest(model_le_within_individual, model_le_pooled)
+```
+
+test for time effects by comparing within estimator and pooled regression:
+```{r}
+pFtest(model_le_within_time, model_le_pooled)
+```
+
+test for time effects additionally to individual effects by comparing within estimator (both individual and time) and within estimator (only individual):
+```{r}
+pFtest(model_le_within_time_individual, model_le_within_individual)
+```
+
+Since the twoways model performs significantl better than the model with only individual effects, we will control for both individual and time effects.
+
+
+### Hausman test
+
+to check whether we could also use a random effects model for the effects that we have found (tests whether the unique errors (=individual effects) are correlated with the predictors)
+Since we do not have enough data for the twoways random effects model, we can unfortunately only compare the one with individual effects only
+
+```{r}
+model_le_random_individual <- plm(formula_le, 
+                   data = data_panel_life_expect, 
+                    index = c("country_name", "year"), 
+                    effect = "individual", model = "random")
+
+
+phtest(model_le_within_individual, model_le_random_individual)
+```
+Since the p-value is very small, we go for the fixed effects model and don't consider the random effects model any further.
+
+
+### Final model
+summary table of final model with clustered standard errors
+
+```{r}
+
+stargazer(model_le_within_time_individual,
+          se = list(clse(model_le_within_time_individual)),
+          type = "text",
+          title = "Panel regression for life expectancy, controlling for fixed country and year effects", 
+          dep.var.labels = "Life expectancy (years)", 
+          #column.labels=c(1,2,3,4), 
+          covariate.labels = c("Undernourishment", "Obesity", "Drinking water", "Electricity", "Sanitation", "Clean cooking", "Air pollution (particles)", "Air pollution (ozone)", "UHC", "DTP3", "Unmet contraception","Stability", "Unemployment", "Lower secondary school", "Voice","Alcohol", "HIV (untreated)", "log(GDP)"),
+          align = TRUE, 
+          omit.stat=c("LL","f"), 
+          star.char = c("+","*","**","***"),
+          star.cutoffs =c(0.1, 0.05, 0.01, 0.001), 
+          notes = c("$+$ p$<$0.1; $^*$ p$<$0.05; $^{**}$ p$<$0.01; $^{***}$ p$<$0.001"), 
+          report = "vc*",
+          #notes = "Standard errors are shown in parentheses.", 
+          notes.append = F, 
+          model.numbers=T, 
+          no.space=T,
+          label= "tab:panel_le")
+```
+The negative coefficient for voice is unexpected. Let's check how strongly it actually varies:
+```{r}
+model.matrix(model_le_within_time_individual, model = "within")[,"voice"] %>% hist(breaks=200)
+```
+
+
+
+
+have a look at the distribution of the country effects
+```{r}
+country_effects <- fixef(model_le_within_time_individual, effect = "individual") 
+hist(country_effects)
+```
+
+
+
+
+
+have a look at the time effects
+```{r}
+time_effects <- fixef(model_le_within_time_individual, effect = "time") 
+time_effects <- time_effects - time_effects[1] 
+time_effects_df <- data.frame(Year = as.numeric(names(time_effects)), 
+                              fixef = as.vector(time_effects))
+time_effects_df %>% 
+  ggplot() + 
+  geom_point(aes(x=Year, y=fixef)) +
+  theme_light() +
+  ylab("Time effect") +
+  theme(text = element_text(size=12, family="LM Roman 10"))
+ggsave(file = "../results/figures/panel_time_effects_le.pdf", dpi = 600, width = 160, height = 120, units = "mm", device = cairo_pdf)
+```
+looks extremely linear, let's check:
+```{r}
+lm(fixef~Year, time_effects_df) %>% summary()
+```
+The fit is almost perfect! This tells us that there is a linear trend in life expectancy not explained by changes in the predictors.
+
+
+
+
+
+## Composite indicator
+
+### formula
+
+```{r}
+formula_le_comp <- life_expect ~
+          undernourishment +
+         obesity +
+  
+         composite_safe_home +
+         
+                 
+  
+         air_pollution_particles +
+         air_pollution_ozone +
+
+         uhc_who +
+         dtp3 +
+
+         unmet_contraception +
+         
+         #social_support +
+
+         stability +         
+
+         #cbn_poverty +
+         unemployment_ilo +
+
+         lower_secondary_school +
+
+         voice +
+ 
+         #freedom +
+
+         alcohol +
+         HIV_unaids_untreated +
+         gdp
+```
+
+
+
+### Fixed effects models
+
+within estimator, individual effects
+```{r}
+model_le_comp_within_individual <- plm(formula_le_comp, 
+                   data = data_panel_life_expect,
+                    index = c("country_name", "year"), 
+                    effect = "individual", model = "within")
+```
+
+within estimator, time effects
+```{r}
+model_le_comp_within_time <- plm(formula_le_comp, 
+                   data = data_panel_life_expect,
+                    index = c("country_name", "year"), 
+                    effect = "time", model = "within")
+```
+
+within estimator, individual and time effects
+```{r}
+model_le_comp_within_time_individual <- plm(formula_le_comp, 
+                   data = data_panel_life_expect,
+                    index = c("country_name", "year"), 
+                    effect = "twoways", model = "within")
+```
+
+pooled
+```{r}
+model_le_comp_pooled <- plm(formula_le_comp, 
+                   data = data_panel_life_expect, 
+                    index = c("country_name", "year"), 
+                    effect = "individual", model = "pooling")
+```
+
+
+
+### F-tests
+test for individual effects by comparing within estimator and pooled regression:
+```{r}
+pFtest(model_le_comp_within_individual, model_le_comp_pooled)
+```
+
+test for time effects by comparing within estimator and pooled regression:
+```{r}
+pFtest(model_le_comp_within_time, model_le_comp_pooled)
+```
+
+test for time effects additionally to individual effects by comparing within estimator (both individual and time) and within estimator (only individual):
+```{r}
+pFtest(model_le_comp_within_time_individual, model_le_comp_within_individual)
+```
+
+
+### Hausman test
+
+to check whether we could also use a random effects model for the effects that we have found (tests whether the unique errors (=individual effects) are correlated with the predictors)
+Since we do not have enough data for the twoways random effects model, we can unfortunately only compare the one with individual effects only
+
+```{r}
+model_le_comp_random_individual <- plm(formula_le_comp, 
+                   data = data_panel_life_expect, 
+                    index = c("country_name", "year"), 
+                    effect = "individual", model = "random")
+
+
+phtest(model_le_comp_within_individual, model_le_comp_random_individual)
+```
+Since the p-value is very small, we go for the fixed effects model and don't consider the random effects model any further.
+
+
+### Final model
+summary table of final model with clustered standard errors
+
+```{r}
+
+stargazer(model_le_comp_within_time_individual,
+          se = list(clse(model_le_comp_within_time_individual)),
+          type = "text",
+          title = "Panel regression for life expectancy using a composite indicator for good housing, controlling for fixed country and year effects", 
+          dep.var.labels = "Life expectancy (years)", 
+          #column.labels=c(1,2,3,4), 
+          covariate.labels = c("Undernourishment", "Obesity", "Composite indicator for good housing", "Air pollution (particles)", "Air pollution (ozone)", "UHC", "DTP3", "Unmet contraception","Stability", "Unemployment", "Lower secondary school", "Voice","Alcohol", "HIV (untreated)", "log(GDP)"),
+          align = TRUE, 
+          omit.stat=c("LL","f"), 
+          star.char = c("+","*","**","***"),
+          star.cutoffs =c(0.1, 0.05, 0.01, 0.001), 
+          notes = c("$+$ p$<$0.1; $^*$ p$<$0.05; $^{**}$ p$<$0.01; $^{***}$ p$<$0.001"),  
+          report = "vc*",
+          #notes = "Standard errors are shown in parentheses.", 
+          notes.append = F, 
+          model.numbers=T, 
+          no.space=T,
+          label="tab:panel_le_comp")
+```
+
+
+have a look at the time effects
+```{r}
+time_effects <- fixef(model_le_comp_within_time_individual, effect = "time") 
+time_effects <- time_effects - time_effects[1] 
+time_effects_df <- data.frame(Year = as.numeric(names(time_effects)), 
+                              fixef = as.vector(time_effects))
+time_effects_df %>% 
+  ggplot() + 
+  geom_point(aes(x=Year, y=fixef)) +
+  theme_light() +
+  ylab("Time effect") +
+  theme(text = element_text(size=10, family="LM Roman 10"))
+ggsave(file = "../results/figures/panel_time_effects_le_comp.pdf", dpi = 600, width = 8, height = 6, units = "in")
+```
+looks extremely linear, let's check:
+```{r}
+lm(fixef~Year, time_effects_df) %>% summary()
+```
+fit almost perfect!
+
+
+
+<!-- ## Mixed model -->
+
+<!-- get demeaned estimates -->
+
+<!-- ```{r} -->
+<!-- data_panel_life_expect_demeaned <- cbind( -->
+<!--   data_panel_life_expect, -->
+<!--   datawizard::demean(data_panel_life_expect, select = c("life_expect", "undernourishment", "cbn_poverty", "electricity", "drinking_water_basic", "sanitation_basic", "clean_cooking_gbd", "composite_safe_home", "air_pollution_particles", "air_pollution_ozone", "uhc_who", "unmet_contraception", "dtp3", "unemployment_ilo", "voice", "stability", "alcohol", "tobacco", "HIV_unaids_untreated", "gdp"), group = "country_name") -->
+<!-- ) -->
+
+<!-- ``` -->
+
+<!-- fit mixed model -->
+<!-- ```{r} -->
+<!-- mixed_le <- lmer( -->
+<!--   life_expect ~ -->
+<!--   undernourishment_within + -->
+<!--   #obesity + -->
+
+<!--   electricity_within + -->
+<!--   drinking_water_basic_within + -->
+<!--   sanitation_basic_within + -->
+<!--   clean_cooking_gbd_within + -->
+
+<!--   air_pollution_particles_within + -->
+<!--   air_pollution_ozone_within + -->
+
+<!--   uhc_who_within + -->
+<!--   unmet_contraception_within + -->
+<!--   dtp3_within + -->
+<!--   #health_expenditure + -->
+
+<!--   unemployment_ilo_within + -->
+
+<!--   voice_within + -->
+
+<!--   stability_within + -->
+
+<!--   alcohol_within + -->
+<!--   tobacco_within + -->
+<!--   HIV_unaids_untreated_within + -->
+
+<!--   gdp_within + -->
+
+<!--   undernourishment_between + -->
+<!--   #obesity + -->
+
+<!--   cbn_poverty + -->
+
+<!--   electricity_between + -->
+<!--   drinking_water_basic_between + -->
+<!--   sanitation_basic_between + -->
+<!--   clean_cooking_gbd_between + -->
+
+<!--   air_pollution_particles_between + -->
+<!--   air_pollution_ozone_between + -->
+
+<!--   uhc_who_between + -->
+<!--   unmet_contraception_between + -->
+<!--   dtp3_between + -->
+<!--   #health_expenditure + -->
+
+<!--   unemployment_ilo_between + -->
+
+<!--   voice_between + -->
+
+<!--   stability_between + -->
+
+<!--   alcohol_between + -->
+<!--   tobacco_between + -->
+<!--   HIV_unaids_untreated_between + -->
+<!--   gdp_between + -->
+<!--     (1|country_name), -->
+<!--   data = data_panel_life_expect_demeaned -->
+<!-- ) -->
+<!-- model_parameters(mixed_le) -->
+<!-- ``` -->
+
+<!-- fit mixed model with composite indicator -->
+<!-- ```{r} -->
+
+<!-- mixed_le <- lmer( -->
+<!--   life_expect ~ -->
+<!--   undernourishment_within + -->
+<!--   #obesity + -->
+
+<!--   composite_safe_home_within + -->
+
+<!--   air_pollution_particles_within + -->
+<!--   air_pollution_ozone_within + -->
+
+<!--   uhc_who_within + -->
+<!--   unmet_contraception_within + -->
+<!--   dtp3_within + -->
+<!--   #health_expenditure + -->
+
+<!--   unemployment_ilo_within + -->
+
+<!--   voice_within + -->
+
+<!--   stability_within + -->
+
+<!--   alcohol_within + -->
+<!--   tobacco_within + -->
+<!--   HIV_unaids_untreated_within + -->
+
+<!--   gdp_within + -->
+
+<!--   undernourishment_between + -->
+<!--   #obesity + -->
+
+<!--   cbn_poverty + -->
+
+<!--   composite_safe_home_between + -->
+
+<!--   air_pollution_particles_between + -->
+<!--   air_pollution_ozone_between + -->
+
+<!--   uhc_who_between + -->
+<!--   unmet_contraception_between + -->
+<!--   dtp3_between + -->
+<!--   #health_expenditure + -->
+
+<!--   unemployment_ilo_between + -->
+
+<!--   voice_between + -->
+
+<!--   stability_between + -->
+
+<!--   alcohol_between + -->
+<!--   tobacco_between + -->
+<!--   HIV_unaids_untreated_between + -->
+<!--   gdp_between + -->
+<!--     (1|country_name), -->
+<!--   data = data_panel_life_expect_demeaned -->
+<!-- ) -->
+<!-- model_parameters(mixed_le) -->
+<!-- ``` -->
+
+
+
+
+# Life satisfaction
+## Build dataset
+```{r}
+
+data_panel_life_satisfaction_raw <- 
+  data_all %>%
+  group_by(country_name) %>% 
+  arrange(year) %>% 
+  ungroup() %>% 
+  filter(year %in% 2000:2020) %>% 
+    select(country_name,
+         country_code,
+         continent,
+         region,
+         population,
+         year,
+         
+         life_satisfaction,
+         
+         undernourishment,
+         obesity,
+         
+         drinking_water_basic,         
+        
+         electricity,
+         sanitation_basic,
+
+         clean_cooking_gbd,
+         air_pollution_particles,
+         air_pollution_ozone,
+
+         uhc_who,
+         dtp3,
+
+         unmet_contraception,
+         
+         social_support,
+
+         stability,         
+
+         #cbn_poverty,
+         unemployment_ilo,
+
+         lower_secondary_school,
+
+         voice,
+ 
+         freedom,
+
+         alcohol,
+         HIV_unaids,
+         ART,
+         gdp) 
+```
+
+handling of missing values
+- linear interpolation of country time series 
+```{r}
+my_na_interpolation <- function(x){na_interpolation(x, rule = 1)}
+
+data_panel_life_satisfaction_interpolated <- data_panel_life_satisfaction_raw %>% 
+group_by(country_name) %>% 
+  arrange(year) %>% 
+  mutate(
+    across(.cols = where(is.numeric),
+           ~ possibly(my_na_interpolation, otherwise =NA)(.x))) %>% 
+  ungroup() #%>% 
+  #drop_na(life_satisfaction)
+
+# check number of na values per country and predictor
+number_samples_per_country <- data_panel_life_satisfaction_interpolated %>% group_by(country_name) %>% summarise(across(-c(year), ~ sum(!is.na(.), na.rm = TRUE)))
+
+# kick out countries that have more than three predictors completely missing
+countries_take <- number_samples_per_country %>% rowwise() %>%
+  mutate(across(where(is.numeric), ~. == 0)) %>%
+  mutate(number_all_na = sum(rowSums(across(-c(country_name))))) %>%
+  filter(number_all_na<=3)
+
+
+
+```
+
+- median imputation of HIV and ART for countries having no data at all
+```{r}
+data_panel_life_satisfaction_median_imputation <- 
+  data_panel_life_satisfaction_interpolated %>% 
+  #filter(year == 2001, country_name %in% c("Germany", "France", "Netherlands", "Switzerland")) %>% 
+  filter(country_name %in% countries_take[["country_name"]]) %>% 
+  inner_join(number_samples_per_country, by = "country_name", suffix = c("", ".n")) %>% 
+  group_by(year,region) %>%
+  mutate(ART = ifelse(ART.n == 0,
+                         median(ART, na.rm = TRUE),ART),
+         HIV_unaids = ifelse(is.na(HIV_unaids),
+                        median(HIV_unaids, na.rm = TRUE), HIV_unaids)
+         )%>%
+  ungroup() %>%
+  rowwise() %>% 
+  mutate(ART = ifelse(region == "Northern America" && ART.n == 0,
+                      ART[country_name == "Germany"], # using the median of western European countries
+                      ART),
+         HIV_unaids = ifelse(region == "Northern America" && HIV_unaids.n == 0,
+                      HIV_unaids[country_name == "Germany"], # using the median of western European countries
+                      HIV_unaids)
+         ) %>%
+  ungroup() %>% 
+  mutate(HIV_unaids_untreated = HIV_unaids*(100-ART)/100) #%>% drop_na()
+```
+
+check number of values per year
+```{r}
+number_samples <- data_panel_life_satisfaction_median_imputation %>% group_by(year) %>% summarise(across(-c(country_name), ~ sum(!is.na(.), na.rm = TRUE)))
+
+```
+
+final selection, logging of GDP
+```{r}
+start = 2007
+end = 2016
+
+
+data_panel_life_satisfaction_selection <- 
+  data_panel_life_satisfaction_median_imputation %>% 
+  select(country_name:gdp, HIV_unaids_untreated) %>% 
+  select(-c(HIV_unaids, ART)) %>% 
+  filter(year %in% start:end) %>% 
+  drop_na() %>% 
+  group_by(country_name) %>% 
+    #summarize(n())
+  filter(n()==end-start+1) %>%
+  ungroup() %>%
+  mutate(gdp = log(gdp)) 
+   # across(where(is.numeric) & !year & !population,  ~(scale(.) %>% as.vector)))
+```
+
+check number of values per year
+```{r}
+number_samples_final <- data_panel_life_satisfaction_selection %>% group_by(year) %>% summarise(across(-c(country_name), ~ sum(!is.na(.), na.rm = TRUE)))
+
+```
+
+
+
+
+composite indicator for highly correlated safe home predictors
+```{r}
+data_panel_life_satisfaction <- 
+  data_panel_life_satisfaction_selection %>% 
+  #mutate(across(c(electricity, drinking_water_basic, sanitation_basic, clean_cooking_gbd), .fns = list(scale = ~(scale(.) %>% as.vector)), names = "{.col}_{.fn}")) %>% 
+  rowwise() %>% 
+  mutate(composite_safe_home = mean(electricity, drinking_water_basic, sanitation_basic, clean_cooking_gbd))
+```
+
+## All predictors
+
+### formula
+```{r}
+formula_ls <- life_satisfaction ~
+          undernourishment +
+         obesity +
+         
+         drinking_water_basic +         
+        
+         electricity +
+         sanitation_basic +
+
+         clean_cooking_gbd +
+         air_pollution_particles +
+         air_pollution_ozone +
+
+         uhc_who +
+         dtp3 +
+
+         unmet_contraception +
+         
+         social_support +
+
+         stability +         
+
+         #cbn_poverty +
+         unemployment_ilo +
+
+         lower_secondary_school +
+
+         voice +
+ 
+         freedom +
+
+         alcohol +
+         HIV_unaids_untreated +
+         gdp
+``` 
+
+
+### Fixed effects models
+
+within estimator, individual effects
+```{r}
+model_ls_within_individual <- plm(formula_ls, 
+                   data = data_panel_life_satisfaction,
+                    index = c("country_name", "year"), 
+                    effect = "individual", model = "within")
+```
+
+within estimator, time effects
+```{r}
+model_ls_within_time <- plm(formula_ls, 
+                   data = data_panel_life_satisfaction,
+                    index = c("country_name", "year"), 
+                    effect = "time", model = "within")
+```
+
+within estimator, individual and time effects
+```{r}
+model_ls_within_time_individual <- plm(formula_ls, 
+                   data = data_panel_life_satisfaction,
+                    index = c("country_name", "year"), 
+                    effect = "twoways", model = "within")
+
+```
+
+pooled
+```{r}
+model_ls_pooled <- plm(formula_ls, 
+                   data = data_panel_life_satisfaction, 
+                    index = c("country_name", "year"), 
+                    effect = "individual", model = "pooling")
+```
+
+
+
+### F-tests
+test for individual effects by comparing within estimator and pooled regression:
+```{r}
+pFtest(model_ls_within_individual, model_ls_pooled)
+```
+
+test for time effects by comparing within estimator and pooled regression:
+```{r}
+pFtest(model_ls_within_time, model_ls_pooled)
+```
+
+test for time effects additionally to individual effects by comparing within estimator (both individual and time) and within estimator (only individual):
+```{r}
+pFtest(model_ls_within_time_individual, model_ls_within_individual)
+```
+
+Including time effects does not further improve the fit, which is why we will only control for individual effects.
+
+
+### Hausman test
+
+to check whether we could also use a random effects model for the effects that we have found (tests whether the unique errors (=individual effects) are correlated with the predictors)
+
+
+```{r}
+model_ls_random_individual <- plm(formula_ls, 
+                   data = data_panel_life_satisfaction, 
+                    index = c("country_name", "year"), 
+                    effect = "individual", model = "random")
+
+
+phtest(model_ls_within_individual, model_ls_random_individual)
+```
+Since the p-value is very small, we go for the fixed effects model and don't consider the random effects model any further.
+
+
+### Final model
+summary table of final model with clustered standard errors
+
+```{r}
+
+stargazer(model_ls_within_individual,
+          se = list(clse(model_ls_within_individual)),
+          #type = "text",
+          title = "Panel regression for life satisfaction, controlling for fixed country effects", 
+          dep.var.labels = "Life satisfaction (0-10 Cantril Scale)", 
+          #column.labels=c(1,2,3,4), 
+          covariate.labels = c("Undernourishment", "Obesity", "Drinking water", "Electricity", "Sanitation", "Clean cooking", "Air pollution (particles)", "Air pollution (ozone)", "UHC", "DTP3", "Unmet contraception","Social support", "Stability", "Unemployment", "Lower secondary school", "Voice", "Freedom", "Alcohol", "HIV (untreated)", "log(GDP)"),
+          align = TRUE, 
+          omit.stat=c("LL","f"), 
+          star.char = c("+","*","**","***"),
+          star.cutoffs =c(0.1, 0.05, 0.01, 0.001), 
+          notes = c("$+$ p$<$0.1; $^*$ p$<$0.05; $^{**}$ p$<$0.01; $^{***}$ p$<$0.001"), 
+          report = "vc*",
+          #notes = "Standard errors are shown in parentheses.", 
+          notes.append = F, 
+          model.numbers=T, 
+          no.space=T,
+          label= "tab:panel_ls")
+```
+
+The negative coefficient for HIV is unexpected. Let's check how strongly it actually varies:
+```{r}
+model.matrix(model_ls_within_individual, model = "within")[,"HIV_unaids_untreated"] %>% hist(breaks=200)
+```
+
+
+
+## Composite indicator
+
+### formula
+```{r}
+formula_ls_comp <- life_satisfaction ~
+          undernourishment +
+         obesity +
+         
+         composite_safe_home +
+  
+         air_pollution_particles +
+         air_pollution_ozone +
+
+         uhc_who +
+         dtp3 +
+
+         unmet_contraception +
+         
+         social_support +
+
+         stability +         
+
+         #cbn_poverty +
+         unemployment_ilo +
+
+         lower_secondary_school +
+
+         voice +
+ 
+         freedom +
+
+         alcohol +
+         HIV_unaids_untreated +
+         gdp
+```
+
+### Fixed effects models
+
+within estimator, individual effects
+```{r}
+model_ls_comp_within_individual <- plm(formula_ls_comp, 
+                   data = data_panel_life_satisfaction,
+                    index = c("country_name", "year"), 
+                    effect = "individual", model = "within")
+```
+
+within estimator, time effects
+```{r}
+model_ls_comp_within_time <- plm(formula_ls_comp, 
+                   data = data_panel_life_satisfaction,
+                    index = c("country_name", "year"), 
+                    effect = "time", model = "within")
+```
+
+within estimator, individual and time effects
+```{r}
+model_ls_comp_within_time_individual <- plm(formula_ls_comp, 
+                   data = data_panel_life_satisfaction,
+                    index = c("country_name", "year"), 
+                    effect = "twoways", model = "within")
+
+```
+
+pooled
+```{r}
+model_ls_comp_pooled <- plm(formula_ls_comp, 
+                   data = data_panel_life_satisfaction, 
+                    index = c("country_name", "year"), 
+                    effect = "individual", model = "pooling")
+```
+
+
+
+### F-tests
+test for individual effects by comparing within estimator and pooled regression:
+```{r}
+pFtest(model_ls_comp_within_individual, model_ls_comp_pooled)
+```
+
+test for time effects by comparing within estimator and pooled regression:
+```{r}
+pFtest(model_ls_comp_within_time, model_ls_comp_pooled)
+```
+
+test for time effects additionally to individual effects by comparing within estimator (both individual and time) and within estimator (only individual):
+```{r}
+pFtest(model_ls_comp_within_time_individual, model_ls_comp_within_individual)
+```
+
+
+### Hausman test
+
+to check whether we could also use a random effects model for the effects that we have found (tests whether the unique errors (=individual effects) are correlated with the predictors)
+
+
+```{r}
+model_ls_comp_random_individual <- plm(formula_ls_comp, 
+                   data = data_panel_life_satisfaction, 
+                    index = c("country_name", "year"), 
+                    effect = "individual", model = "random")
+
+
+phtest(model_ls_comp_within_individual, model_ls_comp_random_individual)
+```
+Since the p-value is very small, we go for the fixed effects model and don't consider the random effects model any further.
+
+
+### Final model
+summary table of final model with clustered standard errors
+
+```{r}
+
+stargazer(model_ls_comp_within_individual,
+          se = list(clse(model_ls_comp_within_individual)),
+          #type = "text",
+          title = "Panel regression for life satisfaction with composite indicator for good housing, controlling for fixed country effects", 
+          dep.var.labels = "Life satisfaction (0-10 Cantril Scale)", 
+          #column.labels=c(1,2,3,4), 
+          covariate.labels = c("Undernourishment", "Obesity", "Composite indicator for good housing", "Air pollution (particles)", "Air pollution (ozone)", "UHC", "DTP3", "Unmet contraception","Social support", "Stability", "Unemployment", "Lower secondary school", "Voice", "Freedom", "Alcohol", "HIV (untreated)", "log(GDP)"),
+          align = TRUE, 
+          omit.stat=c("LL","f"), 
+          star.char = c("+","*","**","***"),
+          star.cutoffs =c(0.1, 0.05, 0.01, 0.001), 
+          notes = c("$+$ p$<$0.1; $^*$ p$<$0.05; $^{**}$ p$<$0.01; $^{***}$ p$<$0.001"), 
+          report = "vc*",
+          #notes = "Standard errors are shown in parentheses.", 
+          notes.append = F, 
+          model.numbers=T, 
+          no.space=T,
+          label= "tab:panel_ls_comp")
+```
+
+
+
+
+
+
+<!-- ## Mixed model -->
+
+<!-- get demeaned estimates -->
+
+<!-- ```{r} -->
+<!-- data_panel_life_satisfaction_demeaned <- cbind( -->
+<!--   data_panel_life_satisfaction, -->
+<!--   datawizard::demean(data_panel_life_satisfaction, select = c("life_satisfaction", "undernourishment", "cbn_poverty", "electricity", "drinking_water_basic", "sanitation_basic", "clean_cooking_gbd", "air_pollution_particles", "air_pollution_ozone", "uhc_who", "unmet_contraception", "dtp3", "unemployment_ilo", "voice", "stability", "social_support", -->
+<!--   "freedom", "alcohol", "tobacco", "HIV_unaids_untreated", "gdp"), group = "country_name") -->
+<!-- ) -->
+
+<!-- ``` -->
+
+<!-- fit mixed model -->
+<!-- ```{r} -->
+<!-- mixed_ls <- lmer( -->
+<!--   life_satisfaction ~ -->
+<!--   undernourishment_within + -->
+<!--   #obesity + -->
+
+<!--   electricity_within + -->
+<!--   drinking_water_basic_within + -->
+<!--   sanitation_basic_within + -->
+<!--   clean_cooking_gbd_within + -->
+
+<!--   air_pollution_particles_within + -->
+<!--   air_pollution_ozone_within + -->
+
+<!--   uhc_who_within + -->
+<!--   unmet_contraception_within + -->
+<!--   dtp3_within + -->
+<!--   #health_expenditure + -->
+
+<!--   unemployment_ilo_within + -->
+
+<!--   voice_within + -->
+
+<!--   stability_within + -->
+<!--   social_support_within +  -->
+<!--   freedom_within + -->
+
+<!--   alcohol_within + -->
+<!--   tobacco_within + -->
+<!--   HIV_unaids_untreated_within + -->
+
+<!--   gdp_within + -->
+
+<!--   undernourishment_between + -->
+<!--   #obesity + -->
+
+<!--   cbn_poverty + -->
+
+<!--   electricity_between + -->
+<!--   drinking_water_basic_between + -->
+<!--   sanitation_basic_between + -->
+<!--   clean_cooking_gbd_between + -->
+
+<!--   air_pollution_particles_between + -->
+<!--   air_pollution_ozone_between + -->
+
+<!--   uhc_who_between + -->
+<!--   unmet_contraception_between + -->
+<!--   dtp3_between + -->
+<!--   #health_expenditure + -->
+
+<!--   unemployment_ilo_between + -->
+
+<!--   voice_between + -->
+
+<!--   stability_between + -->
+
+<!--   social_support_between +  -->
+<!--   freedom_between + -->
+
+<!--   alcohol_between + -->
+<!--   tobacco_between + -->
+<!--   HIV_unaids_untreated_between + -->
+
+<!--   gdp_between + -->
+<!--     (1|country_name), -->
+<!--   data = data_panel_life_satisfaction_demeaned -->
+<!-- ) -->
+<!-- model_parameters(mixed_ls) -->
+<!-- ``` -->
+

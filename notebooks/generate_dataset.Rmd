@@ -1,0 +1,673 @@
+---
+title: "Generate dataset"
+html_notebook: default
+---
+
+```{r}
+library(readxl)
+library(writexl)
+library(dplyr)
+library(tidyverse)
+library(countrycode)
+library(readr)
+library(lubridate)
+library(data.table)
+library(imputeTS)
+
+```
+
+# Generate dataset with neighboring countries
+```{r}
+country_neighbors_details <- 
+    read_csv("../data/original_data/country_borders_geodatasource.CSV") %>% 
+  mutate(country_code = countrycode(country_name,
+                                    origin='country.name',
+                                    destination = 'iso3c'),
+         region =  countrycode(country_code, origin = 'iso3c', destination = 'un.regionsub.name'),
+         country_code_neighbor = countrycode(country_border_name,
+                                             origin='country.name',
+                                             destination = 'iso3c'),
+         region_neighbor = countrycode(country_code_neighbor, origin = 'iso3c', destination = 'un.regionsub.name')) %>% 
+  transmute(country_code = country_code, region = region, country_name = country_name, country_name_neighbor = country_border_name, region_neighbor =region_neighbor, country_code_neighbor = country_code_neighbor)
+
+
+country_neighbors <- 
+  country_neighbors_details %>% 
+  select(region, country_code, country_code_neighbor, region_neighbor)
+write_xlsx(country_neighbors,"../data/dataset_country_neighbors.xlsx")
+```
+
+
+
+# Get data from different sources
+## Development Indicators World Bank
+```{r}
+data_world_bank <- read_excel("../data/original_data/development_indicators_World_Bank.xlsx", 
+    col_types = c("numeric", "skip", "text", 
+        "text", "numeric", "numeric",
+        "numeric", "numeric","numeric", "numeric",
+        "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric"), na = "..") %>% 
+  rename(
+          year = 'Time',
+          gdp = 'GDP per capita, PPP (constant 2017 international $) [NY.GDP.PCAP.PP.KD]', 
+          clean_cooking= 'Access to clean fuels and technologies for cooking (% of population) [EG.CFT.ACCS.ZS]',
+          electricity = 'Access to electricity (% of population) [EG.ELC.ACCS.ZS]',
+          mortality_poisoning = 'Mortality rate attributed to unintentional poisoning (per 100,000 population) [SH.STA.POIS.P5]',
+          mortality_air_pollution= 'Mortality rate attributed to household and ambient air pollution, age-standardized (per 100,000 population) [SH.STA.AIRP.P5]',
+          drinking_water_basic = "People using at least basic drinking water services (% of population) [SH.H2O.BASW.ZS]",
+          drinking_water_improved = 'People using safely managed drinking water services (% of population) [SH.H2O.SMDW.ZS]',
+          sanitation_basic = 'People using at least basic sanitation services (% of population) [SH.STA.BASS.ZS]',
+          sanitation_improved = "People using safely managed sanitation services (% of population) [SH.STA.SMSS.ZS]",
+          physicians = 'Physicians (per 1,000 people) [SH.MED.PHYS.ZS]',
+          undernourishment ='Prevalence of undernourishment (% of population) [SN.ITK.DEFC.ZS]',
+          nurses_midwifes = 'Nurses and midwives (per 1,000 people) [SH.MED.NUMW.P3]',
+          secondary_school = 'School enrollment, secondary (% gross) [SE.SEC.ENRR]',
+          secondary_school_net =  'School enrollment, secondary (% net) [SE.SEC.NENR]',
+          primary_school = 'School enrollment, primary (% gross) [SE.PRM.ENRR]',
+          primary_school_net =  'School enrollment, primary (% net) [SE.PRM.NENR]',
+          unemployment_national = 'Unemployment, total (% of total labor force) (national estimate) [SL.UEM.TOTL.NE.ZS]',
+          unemployment_ilo = 'Unemployment, total (% of total labor force) (modeled ILO estimate) [SL.UEM.TOTL.ZS]',
+          poverty_2_15 = 'Poverty headcount ratio at $2.15 a day (2017 PPP) (% of population) [SI.POV.DDAY]',
+          poverty_3_65 = 'Poverty headcount ratio at $3.65 a day (2017 PPP) (% of population) [SI.POV.LMIC]',
+          poverty_6_85 = 'Poverty headcount ratio at $6.85 a day (2017 PPP) (% of population) [SI.POV.UMIC]',
+          income_lowest_fifth = 'Income share held by lowest 20% [SI.DST.FRST.20]', 
+          alcohol = 'Total alcohol consumption per capita (liters of pure alcohol, projected estimates, 15+ years of age) [SH.ALC.PCAP.LI]',
+          tobacco = 'Prevalence of current tobacco use (% of adults) [SH.PRV.SMOK]',
+          gini = 'Gini index [SI.POV.GINI]',
+          population = 'Population, total [SP.POP.TOTL]',
+          homicide_rate = 'Intentional homicides (per 100,000 people) [VC.IHR.PSRC.P5]',
+          air_pollution_particles_exposure = 'PM2.5 air pollution, mean annual exposure (micrograms per cubic meter) [EN.ATM.PM25.MC.M3]',
+          uhc_who = 'UHC service coverage index [SH.UHC.SRVS.CV.XD]',
+          life_expect = 'Life expectancy at birth, total (years) [SP.DYN.LE00.IN]') %>% 
+  clean_names() %>% 
+  filter(year >= 1990)
+```
+
+## School enrolment UNESCO
+```{r}
+data_gross_upper_secondary <- read_excel("../data/original_data/school_gross_enrolment_upper_secondary_UNESCO.xlsx", 
+    col_types = c("text", "skip", "numeric", 
+        "numeric", "numeric", "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", "numeric"), 
+    na = "..", skip = 3) %>% 
+  rename(country_name = "Time") %>% 
+  pivot_longer(`2000`:`2019`,names_to = "year", values_to = "upper_secondary_school", names_transform = as.integer) %>% 
+  mutate(country_code = countrycode(country_name, origin='country.name', destination = 'iso3c')) %>% 
+  select(country_code, year, upper_secondary_school) %>% 
+  drop_na(country_code)
+
+data_gross_lower_secondary <- read_excel("../data/original_data/school_gross_enrolment_lower_secondary_UNESCO.xlsx", 
+    col_types = c("text", "skip", "numeric", 
+        "numeric", "numeric", "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", "numeric"), 
+    na = "..", skip = 3) %>% 
+  rename(country_name = "Time") %>% 
+  pivot_longer(`2000`:`2019`,names_to = "year", values_to = "lower_secondary_school", names_transform = as.integer) %>% 
+  mutate(country_code = countrycode(country_name, origin='country.name', destination = 'iso3c')) %>% 
+  select(country_code, year, lower_secondary_school) %>% 
+  drop_na(country_code)
+```
+
+
+
+## World Happiness Report
+```{r}
+data_whr <- 
+  read_excel("../data/original_data/world_happiness_report_2021.xls") %>% 
+  rename(country_name = 'Country name', life_satisfaction = 'Life Ladder', healthy_life_expect = 'Healthy life expectancy at birth', social_support = 'Social support', freedom = 'Freedom to make life choices', generosity = 'Generosity', perception_corruption = 'Perceptions of corruption' ) %>% 
+  filter(country_name!='North Cyprus') %>% 
+  mutate(country_code = countrycode(country_name, origin='country.name', destination = 'iso3c'), social_support=social_support*100, freedom=freedom*100) %>% 
+  select(country_code, year, life_satisfaction,healthy_life_expect, social_support, freedom, generosity, perception_corruption)
+
+```
+
+## Governance indicators World Bank
+```{r}
+data_governance <- 
+  read_excel("../data/original_data/governance_indicators_World_Bank.xlsx") %>% 
+  fill(Indicator, Country) %>% select(Indicator, Country, Year, 'Governance (-2.5 to +2.5)') %>% 
+  pivot_wider(names_from = Indicator, values_from = 'Governance (-2.5 to +2.5)' ) %>% 
+  select(Country,Year,'Voice and Accountability','Political Stability and Absence of Violence/Terrorism', 'Control of Corruption') %>% 
+  transmute(country_code = countrycode(Country, origin='country.name', destination = 'iso3c'), 
+            year  = as.numeric(Year), 
+            voice = `Voice and Accountability`, 
+            stability = `Political Stability and Absence of Violence/Terrorism`,
+            control_corruption = `Control of Corruption` )
+
+```
+
+## Corruption Perceptions Index Transparency International
+```{r}
+data_corruption <- read_excel("../data/original_data/corruption_perceptions_index_Transparency_International.xlsx", 
+    sheet = "CPI Timeseries 2012 - 2021", 
+    na = "NA", skip = 2) %>% 
+  select(ISO3, starts_with("CPI score") ) %>% 
+  pivot_longer(starts_with("CPI score"), names_to = "year", names_prefix = "CPI [Ss]core ", names_transform = as.numeric, values_to = "corruption_index") %>% 
+  rename(country_code = "ISO3" )
+```
+
+## Health expenditure WHO
+```{r}
+data_health_expenditure <- 
+  read_excel("../data/original_data/health_expenditure_WHO.xlsx", col_types = c("text", "text", "skip", 
+                                                               "numeric", "numeric", "numeric", "numeric", 
+                                                                "numeric", "numeric", "numeric", "numeric", "numeric", 
+                                                                "numeric", "numeric", "numeric", "numeric", "numeric", 
+                                                                "numeric", "numeric", "numeric", "numeric", "numeric", 
+                                                                "numeric")) %>% 
+  pivot_longer(cols = -c(Countries, Indicators), names_to = "year", values_to = "health_expenditure", names_transform = as.numeric)
+
+data_health_expenditure$Countries[data_health_expenditure$Countries=='Türkiye'] <- "Turkey"
+
+data_health_expenditure <- data_health_expenditure %>% 
+  transmute(country_code = countrycode(Countries, origin='country.name', destination = 'iso3c'), year, health_expenditure)
+```
+
+
+## Obesity and underweight NCD Risk Factor Collaboration Network
+```{r}
+data_obesity_by_sex <- 
+  read_csv("../data/original_data/BMI_NCD_risk_factor_collaboration.csv",
+           locale=locale(encoding="latin1")) %>% 
+  transmute(country_code = ISO, year = Year, sex = Sex, 
+            obesity = `Prevalence of BMI>=30 kg/m² (obesity)`,
+            underweight = `Prevalence of BMI<18.5 kg/m² (underweight)`) %>% 
+  filter(year>=1990)
+  
+data_female_ratio <- 
+  read_excel("../data/original_data/female_ratio_population.xlsx", na = "..") %>% 
+  transmute(year = Time, country_code = `Country Code`, 
+            female_ratio = `Population, female (% of total population) [SP.POP.TOTL.FE.ZS]`/100) %>% 
+  na.omit(country_code) 
+
+data_obesity <- 
+  data_obesity_by_sex %>% 
+  left_join(data_female_ratio, by= c("country_code", "year")) %>% 
+  replace(is.na(.), 0.5) %>% 
+  rowwise() %>% 
+  mutate(ratio = ifelse(sex == "Men", 1-female_ratio, female_ratio)) %>% 
+  ungroup() %>% 
+  group_by(country_code, year) %>% 
+  summarise(obesity = weighted.mean(obesity, ratio)*100, underweight = weighted.mean(underweight, ratio)*100) %>% 
+  ungroup()
+  
+```
+
+## Air pollution ozone GBD
+```{r}
+data_ozone <- 
+  read_csv("../data/original_data/air_pollution_ozone_GBD.CSV", 
+    col_types = cols(measure_id = col_skip(), 
+        measure_name = col_skip(), rei_id = col_skip(), 
+        rei_name = col_skip(), median = col_skip(), 
+        upper = col_skip(), lower = col_skip())) %>% 
+        filter(location_id < 523) %>% 
+        transmute(year = year_id, country_code = countrycode(location_name, origin='country.name', destination = 'iso3c'), air_pollution_ozone = mean ) %>% drop_na(country_code)
+
+```
+
+## Air pollution particles GBD
+
+```{r}
+data_air_particles <- 
+  read_csv("../data/original_data/air_pollution_particles_GBD.CSV", 
+    col_types = cols(measure_id = col_skip(), 
+        measure_name = col_skip(), rei_id = col_skip(), 
+        rei_name = col_skip(), median = col_skip(), 
+        upper = col_skip(), lower = col_skip())) %>% 
+        filter(location_id < 523) %>% 
+        transmute(year = year_id, country_code = countrycode(location_name, origin='country.name', destination = 'iso3c'), air_pollution_particles = mean ) %>% drop_na(country_code)
+
+```
+
+## Clean cooking GBD
+```{r}
+data_clean_cooking_gbd <- 
+read_csv("../data/original_data/solid_cooking_fuels_GBD.CSV", 
+    col_types = cols(measure_id = col_skip(), 
+        measure_name = col_skip(), rei_id = col_skip(), 
+        rei_name = col_skip(), median = col_skip(), 
+        upper = col_skip(), lower = col_skip(), 
+        population = col_skip())) %>% 
+        filter(location_id < 523) %>% 
+        transmute(year = year_id, country_code = countrycode(location_name, origin='country.name', destination = 'iso3c'), clean_cooking_gbd = (1 - mean)*100 ) %>% drop_na(country_code)
+
+```
+
+
+## Contraception GBD
+```{r}
+data_contraception <- 
+read_csv("../data/original_data/contraception_GBD.CSV", 
+    col_types = cols(location_name = col_character(), 
+        sex_id = col_skip(), sex_name = col_skip(), 
+        age_group_id = col_skip(), upper = col_skip(), 
+        lower = col_skip())) %>% 
+        filter(measure == 'Unmet need for any contraceptive method', age_group_name == 'Age-standardized (15-49 years)', metric == 'Proportion of all women') 
+data_contraception$location_name[data_contraception$location_id=='205'] <- "Cote d'Ivoire"
+
+data_contraception <- data_contraception %>%
+  transmute(year = year_id, country_code = countrycode(location_name, origin='country.name', destination = 'iso3c'), unmet_contraception = mean*100)
+  # rename(year = 'year_id', country_name = 'location_name', unmet_contraception = 'mean' ) %>% 
+  #select(year, country_name, unmet_contraception)
+```
+
+## UHC GBD
+```{r}
+data_uhc <- read_csv("../data/original_data/UHC_GBD.CSV", 
+    col_types = cols(measure = col_skip(), 
+        lower = col_skip(), upper = col_skip())) %>% 
+  filter(indicator_name == 'UHC effective coverage index')
+data_uhc$location_name[data_uhc$location_id=='205'] <- "Cote d'Ivoire"
+
+data_uhc <- data_uhc %>% 
+  transmute(year = year_id, country_code = countrycode(location_name, origin='country.name', destination = 'iso3c'), uhc_gbd = val )
+
+```
+
+## HIV GBD
+```{r}
+data_hiv_gbd <- read_csv("../data/original_data/HIV_prevalence_GBD.csv", 
+    col_types = cols(measure_id = col_skip(), 
+        measure_name = col_skip(), sex_id = col_skip(), 
+        sex_name = col_skip(), age_id = col_skip(), 
+        age_name = col_skip(), cause_id = col_skip(), 
+        cause_name = col_skip(), metric_id = col_skip(), 
+        metric_name = col_skip(), upper = col_skip(), 
+        lower = col_skip())) %>% 
+  transmute(country_code = countrycode(location_name, origin='country.name', destination = 'iso3c'), year, HIV_gbd = val/1000)
+```
+
+## HIV UNAIDS
+```{r}
+data_hiv_unaids <- read_excel("../data/original_data/HIV_prevalence_UNAIDS.xlsx", range = "A7:D5799") %>% 
+  transmute(year = ...1, country_code = ...2, HIV_unaids = as.numeric(str_remove(Estimate, "\\<")) )
+```
+
+
+## ART coverage World Bank
+```{r}
+data_art_coverage <- read_excel("../data/original_data/art_coverage_World_Bank.xlsx", 
+    col_types = c("numeric", "skip", "text", 
+        "text", "numeric"), na = "..") %>% filter(Time >= 1990) %>% 
+  transmute(year = Time,
+         country_code = `Country Code`,
+         ART = `Antiretroviral therapy coverage (% of people living with HIV) [SH.HIV.ARTC.ZS]`)
+  
+```
+
+## DTP 3 vaccine coverage WHO
+
+```{r}
+data_dtp3_coverage <- read_csv("../data/original_data/DTP3_coverage_WHO.csv") %>% transmute(country_code = SpatialDimValueCode, year = Period, dtp3 = Value)
+```
+
+## Measles vaccine coverage WHO
+```{r}
+data_measles_coverage <- 
+  read_excel("../data/original_data/measles_coverage_WHO.xlsx") %>% 
+  filter(COVERAGE_CATEGORY == "WUENIC") %>% 
+  transmute(country_code = CODE, year = YEAR, measles_vac = COVERAGE)
+```
+
+## Tuberculosis World Bank
+```{r}
+data_tuberculosis <-  
+  read_excel("../data/original_data/tuberculosis_World_Bank.xlsx", 
+             col_types = c("numeric", "skip", "text", 
+                           "text", "numeric", "numeric", "numeric"),
+             na = "..") %>%
+  rowwise() %>% 
+  transmute(year = Time, 
+            country_code = `Country Code`,
+            tuberculosis_treatment = `Tuberculosis case detection rate (%, all forms) [SH.TBS.DTEC.ZS]` *
+              `Tuberculosis treatment success rate (% of new cases) [SH.TBS.CURE.ZS]`/100, 
+            tuberculosis_incidence = `Incidence of tuberculosis (per 100,000 people) [SH.TBS.INCD]`)
+  
+```
+
+## Antenatal care UNICEF
+```{r}
+data_antenatal <- read_excel("../data/original_data/antenatal_care_UNICEF.xlsx") %>% transmute(year = as.numeric(TIME_PERIOD), country_code = countrycode(`Geographic area`, origin='country.name', destination = 'iso3c'), antenatal_care = as.numeric(OBS_VALUE)) %>% drop_na()
+```
+
+## Psychiatrists WHO
+```{r}
+data_psychiatrists <- read_csv("../data/original_data/psychiatrists_WHO.csv") %>% transmute(country_code = SpatialDimValueCode, year = Period, psychiatrists = Value)
+```
+
+
+## CBN poverty rate Allen and Moatsos
+```{r}
+data_basic_needs_poverty_rate_allen <- read_csv("../data/original_data/CBN_poverty_rate_Allen.csv") %>% transmute(country_code = iso, cbn_poverty = basicneeds_povrate, year = 2011)
+```
+
+```{r}
+data_basic_needs_poverty_rate_moatsos <- read_excel("../data/original_data/CBN_poverty_rate_Moatsos.xlsx", 
+    sheet = "Data Long Format") %>% transmute(country_code = countrycode(country.name, origin='country.name', destination = 'iso3c'), cbn_poverty_moatsos = value*100, year = year) %>% filter(year %in% 1990:2008)
+```
+
+
+
+# Join data
+-join everything
+-add region information
+-sort columns
+```{r}
+data_all <- 
+  full_join(data_world_bank, data_whr, by= c('year', 'country_code')) %>%
+  full_join(data_gross_lower_secondary, by= c('year', 'country_code'))  %>% 
+  full_join(data_gross_upper_secondary, by= c('year', 'country_code')) %>%
+  full_join(data_governance, by= c('year', 'country_code')) %>% 
+  full_join(data_corruption, by= c('year', 'country_code')) %>% 
+  full_join(data_obesity, by= c('year', 'country_code')) %>% 
+  full_join(data_ozone, by= c('year', 'country_code')) %>%  
+  full_join(data_contraception, by= c('year', 'country_code')) %>%  
+  full_join(data_uhc, by= c('year', 'country_code')) %>% 
+  full_join(data_clean_cooking_gbd, by= c('year', 'country_code')) %>%
+  full_join(data_air_particles, by= c('year', 'country_code')) %>% 
+  full_join(data_hiv_gbd, by= c('year', 'country_code')) %>%
+  full_join(data_hiv_unaids, by= c('year', 'country_code')) %>%
+  full_join(data_art_coverage, by= c('year', 'country_code')) %>%
+  full_join(data_dtp3_coverage, by= c('year', 'country_code')) %>%
+  full_join(data_measles_coverage, by= c('year', 'country_code')) %>%
+  full_join(data_tuberculosis, by= c('year', 'country_code')) %>%
+  full_join(data_antenatal, by= c('year', 'country_code')) %>%
+  full_join(data_psychiatrists, by= c('year', 'country_code')) %>%
+  full_join(data_health_expenditure, by= c('year', 'country_code')) %>%
+  full_join(data_basic_needs_poverty_rate_allen, by= c('year', 'country_code')) %>%
+  full_join(data_basic_needs_poverty_rate_moatsos, by= c('year', 'country_code')) %>%
+  drop_na(country_name) %>% 
+  mutate(continent = countrycode(country_code, origin = 'iso3c', destination = 'continent'), 
+         region = countrycode(country_code, origin = 'iso3c', destination = 'un.regionsub.name')) %>%
+  select(country_name,
+         country_code,
+         continent,
+         region,
+         population,
+         year,
+         
+         life_expect,
+         healthy_life_expect,
+         life_satisfaction,
+         
+         undernourishment,
+         underweight,
+         obesity,
+         
+         cbn_poverty,
+         cbn_poverty_moatsos,
+        
+         electricity,
+         mortality_poisoning,
+         mortality_air_pollution,
+         drinking_water_basic,
+         drinking_water_improved,
+         sanitation_basic,
+         sanitation_improved,
+         clean_cooking,
+         clean_cooking_gbd,
+         air_pollution_particles,
+         air_pollution_ozone,
+
+         physicians,
+         psychiatrists,
+         nurses_midwifes,
+         uhc_gbd,
+         uhc_who,
+         unmet_contraception,
+         antenatal_care,
+         ART,
+         dtp3,
+         measles_vac,
+         tuberculosis_treatment,
+         health_expenditure,
+
+         secondary_school,
+         secondary_school_net,
+         primary_school,
+         primary_school_net,
+         lower_secondary_school,
+         upper_secondary_school,
+
+         unemployment_national,
+         unemployment_ilo,
+         poverty_2_15,
+         poverty_3_65,
+         poverty_6_85,
+         income_lowest_fifth,
+         gini,
+
+         social_support,
+         freedom,
+         generosity,
+    
+         homicide_rate,
+         voice,
+         perception_corruption,
+         control_corruption,
+         corruption_index, 
+         stability,
+
+         alcohol,
+         tobacco,
+         HIV_unaids,
+         HIV_gbd,
+         tuberculosis_incidence,
+
+         gdp) %>% 
+  drop_na(region) %>% 
+  mutate(HIV_unaids_untreated = HIV_unaids*(100-ART)/100) %>% 
+  mutate(HIV_gbd_untreated = HIV_gbd*(100-ART)/100)
+
+write_xlsx(data_all,"../data/dataset_need_satisfiers_all_years.xlsx")
+```
+
+
+```{r}
+data_all <- read_excel("../data/dataset_need_satisfiers_all_years.xlsx", 
+    col_types = c("text", "text", "text", "text", 
+        "numeric", "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric",
+        "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric", 
+        "numeric", "numeric", "numeric",
+        "numeric", "numeric", "numeric",
+        "numeric", "numeric", "numeric",
+        "numeric", "numeric","numeric"))
+```
+
+
+check number of values per year
+```{r}
+number_samples <- data_all %>% group_by(year) %>% summarise(across(-c(country_name, country_code), ~ sum(!is.na(.), na.rm = TRUE)))
+
+```
+
+# Build cross-section for 2015
+
+create data for 2015
+```{r}
+proxy_China_school <- data_all %>% filter(country_name == "China", year == 2010) %>% select(lower_secondary_school) %>% pull()
+
+
+data_2015_raw <- data_all  %>% 
+  group_by(country_name) %>%
+  arrange(year) %>%
+  mutate(cbn_poverty = dplyr::lag(cbn_poverty,n=4)) %>%  # cbn poverty rate is only available for 2011, use it as proxy for our time period of interest(2012-2018)
+  ungroup() %>%
+  rowwise() %>% 
+   mutate(
+     lower_secondary_school = ifelse(
+         country_name == "China" && year == 2012,
+         proxy_China_school, # Use China's 2010 value as proxy 
+         lower_secondary_school)) %>%  
+  ungroup() %>% 
+  filter(year %in% 2012:2018) %>%  
+  group_by(country_name, country_code, continent, region) %>% 
+  summarise(across(-c(year), ~mean(., na.rm=TRUE))) %>%
+  ungroup() %>% 
+  drop_na(life_expect)
+```
+control for double entries (no double entries if there is no error running this)
+```{r}
+data_2015_raw %>% column_to_rownames(var = 'country_name')
+```
+
+
+```{r}
+write_xlsx(data_2015_raw,"../data/dataset_need_satisfiers_2015_raw.xlsx")
+```
+
+## Additional HIV sources
+```{r}
+HIV_add <- 
+  read_excel("../data/original_data/HIV_prevalence_additional_sources.xlsx", 
+             col_types = c("text", "numeric", "text","skip", "skip")) %>%
+  filter(year %in% 2012:2018) %>% 
+  transmute(country_code = countrycode(Country, origin='country.name', destination = 'iso3c'),
+            HIV_ind= as.numeric(str_remove(value, "\\<")))
+
+
+countries_HIV_ind <- HIV_add %>% pull(country_code)
+```
+
+
+
+## Imputation
+```{r}
+data_2015_imputed <- 
+  data_2015_raw %>% 
+  full_join(HIV_add, by= "country_code") %>% 
+  mutate(HIV_unaids = coalesce(HIV_unaids, HIV_ind)) %>% 
+  group_by(region) %>% 
+  mutate(HIV_unaids =  ifelse(is.na(HIV_unaids), 
+                            median(HIV_unaids, na.rm = TRUE), 
+                            HIV_unaids),
+         ART = ifelse(is.na(ART), 
+                            median(ART, na.rm = TRUE), 
+                            ART)
+         ) %>% 
+  ungroup() %>% 
+  mutate(ART = ifelse(
+                      region == "Northern America", 
+                      ART[country_name == "Germany"], # using the median of western European countries
+                      ART)
+         ) %>% 
+  mutate(HIV_unaids_untreated = HIV_unaids*(100-ART)/100) %>% 
+  mutate(HIV_gbd_untreated = HIV_gbd*(100-ART)/100)
+
+```
+
+```{r}
+write_xlsx(data_2015_imputed,"../data/dataset_need_satisfiers_2015_imputed.xlsx")
+```
+
+## Final data set
+create final data set with only full observations and selection of variables:
+```{r}
+data_2015 <- data_2015_imputed %>% 
+  select(country_name,
+         country_code,
+         continent,
+         region,
+         population,
+         
+         life_expect,
+         life_satisfaction,
+         
+         undernourishment,
+         obesity,
+
+        
+         drinking_water_basic,
+         
+         electricity,
+         sanitation_basic,
+
+         clean_cooking_gbd,
+         air_pollution_particles,
+         air_pollution_ozone,
+         
+         uhc_who,
+         dtp3,
+
+
+         unmet_contraception,
+         
+         social_support,
+         
+         stability,
+         
+         cbn_poverty,
+         unemployment_ilo,
+         
+         lower_secondary_school,
+
+         voice,
+
+         freedom,
+
+
+
+         alcohol,
+
+         HIV_unaids_untreated,
+
+         gdp
+  
+) %>% 
+  drop_na()
+  
+
+
+
+```
+
+
+
+
+```{r}
+write_xlsx(data_2015,"../data/dataset_need_satisfiers_2015.xlsx")
+write_csv(data_2015, "../data/dataset_need_satisfiers_2015.csv")
+```
+
+
+
+
+for reading the data set:
+```{r}
+data_2015 <- read_xlsx("../data/dataset_need_satisfiers_2015.xlsx") 
+
+```
+
+
+
+
+
+
+
+

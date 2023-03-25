@@ -1,0 +1,1090 @@
+---
+title: "Model selection for cross-sectional life expectancy using cross-validation"
+html_notebook: default
+---
+packages
+```{r, warning = FALSE, message=FALSE}
+library(readxl)
+library(writexl)
+library(dplyr)
+library(tidyverse)
+library(caret)
+library(countrycode)
+library(readr)
+library(stats)
+library(stargazer)
+library(latex2exp)
+library(janitor)
+library(viridis)
+library(factoextra)
+library(modelr)
+library(glmnet)
+library(tidymodels)
+library(mgcv)
+library(sfsmisc)
+library(earth)
+library(pdp)
+library(rpart.plot)
+library(ranger)
+library(rlang)
+library(leaps)
+library(rPref)
+library(parameters)
+library(ggfortify)
+library(gratia)
+
+tidymodels_prefer()
+
+# for Latex fonts: 
+library(extrafont)
+```
+
+helper functions
+```{r}
+source("../utils/step_select_p_value.R")
+source("../utils/step_select_p_value_iterative.R")
+source("../utils/step_select_lasso.R")
+source("../utils/step_select_leaps.R")
+
+source("../utils/utils_validation.R")
+```
+
+
+
+# Preparation
+## Data
+```{r}
+data_2015 <- 
+  read_xlsx("../data/dataset_need_satisfiers_2015.xlsx") 
+
+country_neighbors <- 
+  read_xlsx("../data/dataset_country_neighbors.xlsx")
+```
+
+
+## CV folds
+
+generate different kinds of fold splits for cross-validation
+```{r}
+set.seed(42)
+
+single_region_folds <- group_vfold_cv(data_2015, group = region)
+
+k_folds <- vfold_cv(data_2015, v = 5, repeats = 5)
+
+balanced_region_folds <- group_vfold_cv(data_2015, group = region, v= 5, repeats = 5, balance = "observations")
+
+balanced_region_folds_1_repeat <- group_vfold_cv(data_2015, group = region, v= 5, repeats = 1, balance = "observations")
+
+# define control parameters for cross-validation that allow to extract different information from each fold's model
+cv_control = control_resamples(extract = get_model_stats, save_pred = TRUE)
+
+```
+
+check how even the balanced region folds are regarding number of samples per fold
+
+```{r}
+balanced_region_folds_1_repeat %>% 
+  tidy() %>% 
+  filter(Data == "Assessment") %>% 
+  group_by(Fold) %>% 
+  summarise(n_samples = n())
+```
+
+
+## Base formulas
+
+define ols model
+```{r}
+lin_spec <- 
+    linear_reg() %>% 
+    set_engine("lm")
+```
+
+formula with all predictors
+```{r}
+formula_all <- 
+  life_expect ~ 
+  undernourishment +
+         obesity +
+
+        
+         drinking_water_basic +
+         
+         electricity +
+         sanitation_basic +
+
+         clean_cooking_gbd +
+         air_pollution_particles +
+         air_pollution_ozone +
+         
+         uhc_who +
+         dtp3 +
+
+
+         unmet_contraception +
+         
+         social_support +
+         
+         stability +
+         
+         cbn_poverty +
+         unemployment_ilo +
+         
+         lower_secondary_school +
+
+         voice +
+
+         freedom +
+
+
+
+         alcohol +
+
+         HIV_unaids_untreated +
+
+         gdp
+  
+
+
+formula_all_log <- 
+  life_expect ~ 
+  undernourishment +
+         obesity +
+
+        
+         drinking_water_basic +
+         
+         electricity +
+         sanitation_basic +
+
+         clean_cooking_gbd +
+         air_pollution_particles +
+         air_pollution_ozone +
+         
+         uhc_who +
+         dtp3 +
+
+
+         unmet_contraception +
+         
+         social_support +
+         
+         stability +
+         
+         cbn_poverty +
+         unemployment_ilo +
+         
+         lower_secondary_school +
+
+         voice +
+
+         freedom +
+
+
+
+         alcohol +
+
+         HIV_unaids_untreated +
+
+         log(gdp)
+
+```
+
+# Group 1: Regularisation
+
+## Scan huge workflowset
+
+```{r}
+scan_recipe_set <- 
+   list("log_lasso_sel" = recipe(formula = formula_all,
+                     data = data_2015
+                     ) %>%
+              step_log(gdp) %>%
+              step_select_lasso(all_predictors(), outcome = "life_expect",
+                                               penalty = tune("lasso_sel")),
+      "lasso_sel" = recipe(formula = formula_all,
+                     data = data_2015
+                     ) %>%
+              step_select_lasso(all_predictors(), outcome = "life_expect",
+                                               penalty = tune("lasso_sel")),
+
+      "log_all" = recipe(formula = formula_all,
+                       data = data_2015
+                       ) %>%
+                step_log(gdp),
+      "all" = recipe(formula = formula_all,
+                     data = data_2015
+                     ),
+      "log_sig_iterative" = recipe(formula = formula_all,
+                     data = data_2015
+                     ) %>%
+              step_log(gdp) %>% 
+              step_select_p_value_iterative(all_predictors(), outcome = "life_expect", 
+                                               threshold = tune(), initial_threshold = 0.6),
+      "sig_iterative" = recipe(formula = formula_all,
+                     data = data_2015
+                     ) %>%
+              step_select_p_value_iterative(all_predictors(), outcome = "life_expect", 
+                                               threshold = tune(), initial_threshold = 0.6),
+      "log_exhaustive_Cp" = recipe(formula = formula_all,
+                     data = data_2015
+                     ) %>%
+              step_log(gdp) %>% 
+              step_select_leaps(all_predictors(), outcome = "life_expect", 
+                                               eval_criterion = "Cp"),
+      "log_exhaustive_BIC" = recipe(formula = formula_all,
+                     data = data_2015
+                     ) %>%
+              step_log(gdp) %>% 
+              step_select_leaps(all_predictors(), outcome = "life_expect", 
+                                               eval_criterion = "BIC"),
+      "exhaustive_Cp" = recipe(formula = formula_all,
+                     data = data_2015
+                     ) %>%
+              step_select_leaps(all_predictors(), outcome = "life_expect", 
+                                               eval_criterion = "Cp"),
+      "exhaustive_BIC" = recipe(formula = formula_all,
+                     data = data_2015
+                     ) %>%
+              step_select_leaps(all_predictors(), outcome = "life_expect", 
+                                               eval_criterion = "BIC"),
+      "log_pca" = recipe(formula = formula_all,
+                 data = data_2015
+                 ) %>%
+          step_log(gdp) %>% 
+          step_pca(all_numeric_predictors(), num_comp = tune(), options = list(center = TRUE, scale. =TRUE)),
+      "pca" = recipe(formula = formula_all,
+                     data = data_2015
+                     ) %>% 
+            step_pca(all_numeric_predictors(), num_comp = tune(), options = list(center = TRUE, scale. =TRUE))
+    
+  )
+
+scan_models <- list(ols = lin_spec,
+                    lasso = linear_reg(
+                              penalty = tune("lasso_model"), 
+                              mixture = 1, 
+                              engine = "glmnet"),
+                    ridge = linear_reg(
+                              penalty = tune("ridge"), 
+                              mixture = 0) %>% set_engine("glmnet", path_values = c(0, 10^seq(-10, 0, length.out = 11)))
+)
+      
+
+scan_workflows <- 
+  workflow_set(
+    preproc = scan_recipe_set, 
+    models = scan_models)
+```
+
+```{r}
+cv_results_le_k_scan <- scan_workflows %>% workflow_map("tune_grid", resamples = k_folds, 
+                                                        grid = 10,
+                                                        verbose = TRUE)
+```
+
+
+```{r}
+saveRDS(cv_results_le_k_scan, file = "../results/cv_results_le_k_scan.rds", ascii = FALSE, version = NULL,
+        compress = TRUE, refhook = NULL)
+
+```
+
+```{r}
+cv_results_le_k_scan <- readRDS(file = "../results/cv_results_le_k_scan.rds")
+
+```
+
+
+```{r}
+rank_results(cv_results_le_k_scan, rank_metric = "rmse") %>% 
+  select(-c(.config, preprocessor, model)) %>% 
+  filter(.metric=="rmse") %>% 
+  group_by(wflow_id) %>% 
+  summarize(best_rmse = min(mean)) %>% 
+  arrange(best_rmse)
+```
+
+
+```{r}
+detailed_results <- 
+  cv_results_le_k_scan %>% 
+  extract_workflow_set_result("pca_ols")
+
+detailed_results %>% collect_metrics() %>% select(-c(.config)) %>% filter(.metric=="rmse") %>% arrange(mean)
+```
+```{r}
+detailed_results %>% autoplot(metric = "rmse")
+```
+
+
+
+## Finetuning
+
+### all_ridge
+```{r}
+workflow_ridge <- workflow(preprocessor = recipe(formula = formula_all,
+                                               data = data_2015
+                                               ),
+                         spec = linear_reg(
+                              penalty = tune("ridge"), 
+                              mixture = 0) %>% set_engine("glmnet", path_values = c(0, 10^seq(-4, 1, length.out = 11)))
+                            )
+tune_ridge <- 
+  workflow_ridge %>%
+  tune_grid(resamples = k_folds, 
+            grid = expand_grid(ridge = c(0,seq(0.7,1, by=0.05), seq(1.8,2.2, by = 0.1))),
+            metrics = metric_set(yardstick::rmse))
+
+```
+```{r}
+tune_ridge %>% collect_metrics() %>% select(-c(.config)) %>% filter(.metric=="rmse") %>% arrange(mean)
+```
+```{r}
+tune_ridge %>% 
+  autoplot()
+```
+```{r}
+tune_ridge %>% select_by_one_std_err(metric = "rmse", desc(ridge))
+```
+
+### lasso_sel_lasso
+
+```{r}
+tune_lasso_sel_lasso_2 <- 
+  cv_results_le_k_scan %>% 
+  extract_workflow("lasso_sel_lasso") %>% 
+  tune_grid(resamples = k_folds, 
+            grid = expand_grid(lasso_sel = c(seq(0.01,0.2, by = 0.05), 7.022939e-04),
+                               lasso_model = c(seq(0.01,0.5, by = 0.01), 2.821697e-02)),
+            metrics = metric_set(yardstick::rmse))
+```
+
+```{r}
+tune_lasso_sel_lasso_2 %>% collect_metrics() %>% select(-c(.config)) %>% filter(.metric=="rmse") %>% filter(n==25) %>% arrange(mean)
+```
+```{r}
+tune_lasso_sel_lasso_2 %>% autoplot()
+```
+
+
+
+```{r}
+tune_lasso_sel_lasso_2 %>% select_by_one_std_err(metric = "rmse", desc(lasso_sel), desc(lasso_model))
+```
+```{r}
+tune_lasso_sel_lasso_2 %>% select_by_one_std_err(metric = "rmse", desc(lasso_model), desc(lasso_sel))
+```
+```{r}
+cv_results_le_k_scan %>% 
+  extract_workflow("lasso_sel_lasso") %>% 
+  finalize_workflow(tune_lasso_sel_lasso %>% 
+                      select_by_one_std_err(metric = "rmse", desc(lasso_sel), desc(lasso_model))) %>%
+  fit(data_2015) %>% tidy() %>% filter(estimate!=0)
+```
+
+
+
+### all_lasso
+```{r}
+tune_all_lasso <- 
+  cv_results_le_k_scan %>% 
+  extract_workflow("all_lasso") %>% 
+  tune_grid(resamples = k_folds, 
+            grid = expand_grid(lasso_model = c(0,seq(0.02,0.4, by = 0.02))),
+            metrics = metric_set(yardstick::rmse))
+```
+
+```{r}
+tune_all_lasso %>% collect_metrics() %>% select(-c(.config)) %>% filter(.metric=="rmse") %>% filter(n==25) %>% arrange(mean)
+```
+
+```{r}
+tune_all_lasso %>% autoplot()
+```
+```{r}
+tune_all_lasso %>% select_by_one_std_err(metric = "rmse", desc(lasso_model))
+```
+```{r}
+cv_results_le_k_scan %>% 
+  extract_workflow("all_lasso") %>% 
+  finalize_workflow(tune_all_lasso %>% 
+                      select_by_one_std_err(metric = "rmse", desc(lasso_model))) %>%
+  fit(data_2015) %>% tidy() %>% filter(estimate!=0)
+```
+
+### pca_lasso
+```{r}
+tune_pca_lasso <- 
+  cv_results_le_k_scan %>% 
+  extract_workflow("pca_lasso") %>% 
+  tune_grid(resamples = k_folds, 
+            grid = expand_grid(num_comp= seq(11,17, by = 1), lasso_model =c(1 %o% 10^(-10:0))),
+            metrics = metric_set(yardstick::rmse))
+```
+
+Since there was an error in the original formulation of the pca workflows, we have to to tune it by hand:
+```{r}
+workflow_pca_lasso <- workflow(preprocessor = recipe(formula = formula_all,
+                                               data = data_2015
+                                               ) %>% 
+                                        step_pca(all_numeric_predictors(), num_comp = tune(), options = list(center = TRUE, scale. =TRUE)),
+                         spec = linear_reg(
+                              penalty = tune("lasso_model"), 
+                              mixture = 1, 
+                              engine = "glmnet"))
+tune_pca_lasso <- 
+  workflow_pca_lasso %>%
+  tune_grid(resamples = k_folds, 
+            #grid = grid_regular(range_set(lasso_model(), c(-10,0)), num_comp(c(11,17)), levels = 5),
+            grid = expand_grid(num_comp= c(12,17), lasso_model = c(0.1,0.11,seq(0.23,0.24, by=0.001))),#c(c(1:10 %o% 10^(-2:-1)),0.005)),
+            metrics = metric_set(yardstick::rmse))
+
+```
+
+
+
+```{r}
+tune_pca_lasso %>% collect_metrics() %>% select(-c(.config)) %>% filter(.metric=="rmse") %>% filter(n==25) %>% arrange(mean)
+```
+
+```{r}
+tune_pca_lasso %>% autoplot()
+```
+```{r}
+tune_pca_lasso %>% select_by_one_std_err(metric = "rmse", desc(lasso_model), num_comp)
+```
+
+```{r}
+tune_pca_lasso %>% select_by_one_std_err(metric = "rmse", num_comp, desc(lasso_model))
+```
+
+```{r}
+workflow_pca_lasso %>% 
+  finalize_workflow(tune_pca_lasso %>% 
+                      select_by_one_std_err(metric = "rmse", num_comp, desc(lasso_model))) %>%
+  fit(data_2015) %>% tidy() %>% filter(estimate!=0)
+```
+
+# Group 2: Nonlinearities and interactions
+
+## Random forest
+
+```{r}
+workflow_random_forest <- workflow(preprocessor = recipe(formula = formula_all,
+                                               data = data_2015
+                                               ),
+                         spec = rand_forest(
+                              mode = "regression",
+                              engine = "ranger",
+                              mtry = tune(),
+                              trees = tune(),
+                              min_n = tune()
+                            ))
+tune_random_forest <- 
+  workflow_random_forest %>%
+  tune_grid(resamples = k_folds, 
+            grid = expand_grid(mtry = c(4,5,14), trees = c(500), min_n = c(2)),
+            metrics = metric_set(yardstick::rmse))
+
+```
+```{r}
+tune_random_forest %>% collect_metrics() %>% select(-c(.config)) %>% filter(.metric=="rmse") %>% arrange(mean)
+```
+```{r}
+tune_random_forest %>% 
+  autoplot()
+```
+```{r}
+tune_random_forest %>% select_by_one_std_err(metric = "rmse", mtry)
+```
+
+```{r}
+workflow_random_forest %>% 
+  finalize_workflow(tune_random_forest %>% 
+                      select_by_one_std_err(metric = "rmse", mtry, desc(min_n))) %>%
+  fit(data_2015)
+```
+
+## MARS
+```{r}
+workflow_mars <- workflow(preprocessor = recipe(formula = formula_all,
+                                               data = data_2015
+                                               ),
+                         spec = mars(
+                                    mode = "regression",
+                                    engine = "earth",
+                                    num_terms = tune(),
+                                    prod_degree = tune(),
+                                    prune_method = tune()
+                                    )
+                            )
+
+
+tune_all_mars <- 
+  workflow_mars %>%  
+  tune_grid(resamples = k_folds, 
+            grid = expand_grid(num_terms=seq(6,9,by=1), prod_degree=c(1,2), prune_method=c("forward","none")),
+            metrics = metric_set(yardstick::rmse))
+```
+
+```{r}
+tune_all_mars %>% collect_metrics() %>% select(-c(.config)) %>% filter(.metric=="rmse") %>% filter(n==25) %>% arrange(mean)
+```
+
+```{r}
+tune_all_mars %>% autoplot()
+```
+```{r}
+tune_all_mars %>% select_by_one_std_err(metric = "rmse", num_terms, prod_degree)
+```
+```{r}
+tune_all_mars %>% select_by_one_std_err(metric = "rmse", prod_degree, num_terms)
+```
+
+
+## GAM
+
+```{r}
+gam_formula <- life_expect ~ 
+         undernourishment +
+         obesity +
+
+        
+         drinking_water_basic +
+         
+         electricity +
+         sanitation_basic +
+
+         clean_cooking_gbd +
+         s(air_pollution_particles) +
+         s(air_pollution_ozone) +
+         
+         s(uhc_who) +
+         s(dtp3) +
+
+
+         unmet_contraception +
+         
+         social_support +
+         
+         s(stability) +
+         
+         cbn_poverty +
+         unemployment_ilo +
+         
+         lower_secondary_school +
+
+         s(voice) +
+
+         freedom +
+
+
+
+         s(alcohol) +
+
+         HIV_unaids_untreated +
+
+         s(gdp)
+
+```
+
+```{r}
+gam_spec <- 
+    gen_additive_mod(
+      mode = "regression",
+      select_features = TRUE,
+      adjust_deg_free = tune(),
+      engine = "mgcv"
+)
+
+gam_workflow <- 
+  workflow() %>%
+  add_recipe(recipe(formula = formula_all, data = data_2015)) %>% 
+  add_model(gam_spec, formula = gam_formula)
+
+
+gam_grid <- grid_regular(range_set(adjust_deg_free(), c(2,2.8)), levels = 5)
+
+tune_results_gam <- gam_workflow %>% 
+  tune_grid(resamples = k_folds, 
+            grid = expand_grid(adjust_deg_free = c(1.8,1.9, 2, 2.45, 2.5, 2.55)), 
+            metrics = metric_set(yardstick::rmse))
+
+tune_results_gam %>% collect_metrics() %>% arrange(mean)
+
+```
+```{r}
+tune_results_gam %>% autoplot()
+```
+
+
+```{r}
+tune_results_gam %>% select_by_one_std_err(metric = "rmse", desc(adjust_deg_free))
+```
+
+
+# Selection
+## Define and run tuned models
+```{r}
+selection_recipe_set <- 
+   list("all" = recipe(formula = formula_all,
+                     data = data_2015
+                     )
+  )
+
+selection_models <- list(lasso = linear_reg(
+                                    penalty = 0.36, 
+                                    mixture = 1, 
+                                    engine = "glmnet"),
+                         ridge = linear_reg(
+                                    penalty = 2.1, 
+                                    mixture = 0) %>% 
+                                  set_engine("glmnet", path_values = c(0, 10^seq(-4, 1, length.out = 11))),
+                         forest = rand_forest(
+                                    mode = "regression",
+                                    engine = "ranger",
+                                    mtry = 5,
+                                    trees = 500,
+                                    min_n = 2
+                                  ),
+                         mars = mars(
+                                    mode = "regression",
+                                    engine = "earth",
+                                    num_terms = 8,
+                                    prod_degree = 2,
+                                    prune_method = "forward"
+                                    ),
+                         gam = gen_additive_mod(
+                                    mode = "regression",
+                                    select_features = TRUE,
+                                    adjust_deg_free = 2.55,
+                                    engine = "mgcv")
+)
+      
+
+selection_workflows <- 
+  workflow_set(
+    preproc = selection_recipe_set, 
+    models = selection_models,
+    cross=FALSE)
+
+selection_workflows <- selection_workflows %>% update_workflow_model("all_gam", 
+                                                                     gen_additive_mod(
+                                                                       mode = "regression",
+                                                                       select_features = TRUE,
+                                                                       adjust_deg_free = 2.55,
+                                                                       engine = "mgcv"), 
+                                                                     formula = gam_formula)
+```
+
+```{r}
+cv_results_le_k_selection <- selection_workflows %>% workflow_map("fit_resamples", resamples = k_folds, verbose = TRUE)
+```
+
+add the results of OLS for comparison:
+```{r}
+cv_results_le_k_selection <- cv_results_le_k_selection %>% rbind(cv_results_le_k_scan %>% filter(wflow_id=="all_ols")) 
+```
+... and the results of GDP only:
+```{r}
+cv_results_le_k_gdp <- 
+  workflow_set(preproc = list(log_GDP = recipe(formula = life_expect~gdp, data = data_2015) %>% step_log(gdp)),
+            model = list(ols = lin_spec)) %>% 
+  workflow_map("fit_resamples", resamples = k_folds, verbose = TRUE)
+
+cv_results_le_k_selection <- cv_results_le_k_selection %>% rbind(cv_results_le_k_gdp %>% filter(wflow_id=="log_GDP_ols")) 
+```
+
+
+```{r}
+saveRDS(cv_results_le_k_selection, file = "../results/cv_results_le_k_selection.rds", ascii = FALSE, version = NULL,
+        compress = TRUE, refhook = NULL)
+
+```
+
+
+## Generate statistics
+```{r}
+cv_results_le_k_selection <- readRDS(file = "../results/cv_results_le_k_selection.rds")
+```
+
+
+
+```{r}
+selected_workflows_statistics <- 
+  rank_results(cv_results_le_k_selection, rank_metric = "rmse") %>% 
+  filter(.metric == "rmse") %>% 
+  transmute(workflow_id=wflow_id, rmse=mean, rmse_std_err=std_err) %>%
+  rowwise() %>% 
+  mutate(moran_neighbors = cv_results_le_k_selection %>%
+                                    extract_workflow(workflow_id) %>% 
+                                    workflow_residual_moran_neighbors(data_2015, 
+                                                                      country_neighbors, 
+                                                                      name_true_values = "life_expect" ) %>% 
+                                    pull(moran_index)
+                                  
+         ) %>% 
+  mutate(complexity = ifelse(
+                          str_detect(workflow_id, ".lasso" ) ||  str_detect(workflow_id, ".ridge" ),
+                                           cv_results_le_k_selection %>%
+                                           extract_workflow(workflow_id) %>%
+                                           fit(data=data_2015) %>%
+                                           tidy() %>% 
+                                           filter(estimate!=0) %>% 
+                                           nrow(),
+                          ifelse(str_detect(workflow_id, ".gam"),
+                                           cv_results_le_k_selection %>%
+                                            extract_workflow("all_gam") %>%
+                                            fit(data=data_2015) %>% 
+                                            extract_fit_engine() %>% 
+                                            summary() %>% 
+                                            with(length(p.coeff) + sum(edf)) %>% 
+                                            round(2), 
+                             cv_results_le_k_selection %>% 
+                               extract_workflow(workflow_id) %>% 
+                               fit(data=data_2015) %>% 
+                               extract_fit_engine() %>% 
+                               coefficients() %>% 
+                               length()
+                             ))
+         ) %>% 
+  mutate(complexity = ifelse(str_detect(workflow_id, ".mars*" ),11, complexity)) # manually change mars due to interaction terms
+
+
+saveRDS(selected_workflows_statistics, file = "../results/selected_workflows_statistics_le.rds", ascii = FALSE, version = NULL,
+        compress = TRUE, refhook = NULL)
+
+```
+
+What are the pareto optimal solutions regarding performance, spatial autocorrelation of the final fit and complexity?
+
+```{r}
+pref_pareto <- low(rmse, selected_workflows_statistics) * low(moran_neighbors) * low(complexity)
+
+pareto_selection <- peval(pref_pareto) %>% print()
+```
+
+
+## Pretty summary table
+
+```{r}
+selected_workflows_statistics <- readRDS(file = "../results/selected_workflows_statistics_le.rds") %>% print()
+```
+
+```{r}
+pretty_table <- selected_workflows_statistics %>% 
+  rename(Model = "workflow_id", `Cross-validation error` = "rmse", 
+         `Standard deviation`= "rmse_std_err", `Moran's I` = "moran_neighbors", Complexity = "complexity") %>% 
+  select(-Complexity) %>% 
+  mutate(Model = case_when(Model == "all_ols" ~ "OLS all predictors",
+                           Model == "log_GDP_ols" ~ "OLS GDP only",
+                           Model == "all_gam" ~ "GAM",
+                           Model == "all_ridge" ~ "Ridge",
+                           Model == "all_lasso" ~ "LASSO",
+                           Model == "all_mars" ~ "MARS",
+                           Model == "all_forest" ~ "Random Forest",
+                           TRUE ~ Model)) %>% 
+  arrange(factor(Model, levels = c("OLS GDP only", "OLS all predictors", "LASSO", "Ridge", "MARS", "GAM", "Random forest")))
+  
+  
+
+pretty_table %>% 
+  column_to_rownames(var = 'Model') %>% 
+  stargazer(summary=FALSE,  
+            align=TRUE, 
+            title = "Cross-validation errors of the tuned models for life expectancy, hyperparameters selected with one-standard-error rule. The values of the ordinary least squares models using GDP only or all predictors are shown for comparison.",
+            label = "tab:cv_models_le")
+```
+
+
+make a plot showing the differences in performance:
+```{r}
+pretty_table %>% 
+  mutate(Model = factor(Model, levels=Model)) %>%  # to lock the ordering for ggplot
+  ggplot() +
+  geom_col(aes(x=`Cross-validation error`, y=fct_rev(Model)), width=0.4) +
+  theme_light() +
+  theme(text = element_text(size=12, family="LM Roman 10")) +
+  geom_hline(yintercept = 5.5) +
+    labs(y = NULL, x="Cross-validation error (years)")
+ggsave(file = "../results/figures/model_selection_cv_error_life_expect.pdf", dpi = 600,width = 160, height = 72.7272, units = "mm",device = cairo_pdf)
+```
+
+
+
+## Details of final models
+
+
+### GAM
+
+```{r}
+fit_gam_direct <- gam(gam_formula, data = data_2015, select = TRUE, gamma = 2.55)
+summary(fit_gam_direct)
+```
+
+```{r}
+draw(fit_gam_direct, shade = TRUE)
+```
+```{r}
+sm <- smooth_estimates(fit_gam_direct)
+```
+
+
+```{r}
+sm %>%
+  add_confint() %>%
+  ggplot(aes(y = est, x = air_pollution_particles)) +
+    geom_ribbon(aes(ymin = lower_ci, ymax = upper_ci),
+                alpha = 0.2) +
+    geom_line() +
+    labs(y = "Partial effect (years)",
+         x = TeX("Air pollution (particles, $\\mu$g/m$^3$)")) +
+  theme_light() &
+  theme(text = element_text(size=10, family="LM Roman 10"))
+ggsave(file = "../results/figures/gam_le_particles.pdf", dpi = 600, width = 78.4, height = 58.8, units = "mm",device = cairo_pdf)
+```
+
+```{r}
+sm %>%
+  add_confint() %>%
+  ggplot(aes(y = est, x = uhc_who)) +
+    geom_ribbon(aes(ymin = lower_ci, ymax = upper_ci),
+                alpha = 0.2) +
+    geom_line() +
+    labs(y = "Partial effect (years)",
+         x = "UHC index") +
+  theme_light() &
+  theme(text = element_text(size=10, family="LM Roman 10"))
+ggsave(file = "../results/figures/gam_le_uhc.pdf", dpi = 600, width = 78.4, height = 58.8, units = "mm",device = cairo_pdf)
+```
+
+
+```{r}
+sm %>%
+  add_confint() %>%
+  ggplot(aes(y = est, x = dtp3)) +
+    geom_ribbon(aes(ymin = lower_ci, ymax = upper_ci),
+                alpha = 0.2) +
+    geom_line() +
+    labs(y = "Partial effect (years)",
+         x = "DTP3 (%)") +
+  theme_light() &
+  theme(text = element_text(size=10, family="LM Roman 10"))
+ggsave(file = "../results/figures/gam_le_dtp3.pdf", dpi = 600, width = 78.4, height = 58.8, units = "mm",device = cairo_pdf)
+```
+
+
+```{r}
+sm %>%
+  add_confint() %>%
+  ggplot(aes(y = est, x = voice)) +
+    geom_ribbon(aes(ymin = lower_ci, ymax = upper_ci),
+                alpha = 0.2) +
+    geom_line() +
+    labs(y = "Partial effect (years)",
+         x = "Voice (standard normal units)") +
+  theme_light() &
+  theme(text = element_text(size=10, family="LM Roman 10"))
+ggsave(file = "../results/figures/gam_le_voice.pdf", dpi = 600, width = 78.4, height = 58.8, units = "mm",device = cairo_pdf)
+```
+
+```{r}
+appraise(fit_gam_direct)
+```
+
+
+
+
+
+
+### Lasso
+```{r}
+all_lasso <- 
+  cv_results_le_k_selection %>% 
+  extract_workflow("all_lasso")
+
+fit_all_lasso <- 
+  all_lasso %>% 
+  fit(data_2015)
+
+tidy(fit_all_lasso) %>% filter(estimate!=0)
+  
+```
+same model with standardized data
+```{r}
+recipe_normalize <- recipe(formula = formula_all, data = data_2015) %>% 
+                    step_normalize(all_predictors())
+recipe_normalize %>% prep(data_2015) %>% bake(data_2015)
+
+all_lasso_standard <- 
+  workflow(preprocessor = recipe_normalize,
+           spec = linear_reg(penalty = 0.36,
+                             mixture = 1) %>% 
+             set_engine("glmnet", standardize = FALSE))
+
+fit_all_lasso_standard <- 
+  all_lasso_standard %>% 
+  fit(data_2015)
+
+tidy(fit_all_lasso_standard)    
+```
+
+
+
+error estimate of group v-fold cross-validation with balanced fold sizes:
+```{r}
+all_lasso %>% 
+  fit_resamples(resamples = balanced_region_folds) %>% 
+  collect_metrics()
+```
+perform single group-wise cross-validation
+```{r}
+cv_results_single_region_all_lasso <- 
+  all_lasso %>% 
+  fit_resamples(resamples = single_region_folds, control = cv_control)
+
+cv_results_single_region_all_lasso %>% collect_metrics()
+```
+
+inspect error per group and per country
+```{r}
+error_per_test_region_all_lasso <- get_error_per_test_region(cv_results_single_region_all_lasso, single_region_folds, data_2015) %>% print()
+```
+
+```{r}
+error_per_country_all_lasso <- 
+  get_error_per_country_cv(cv_results_single_region_all_lasso, fit_all_lasso, data_2015, life_expect) %>% 
+  print()
+```
+look at residuals per group
+```{r}
+error_per_country_all_lasso %>% 
+  group_by(region) %>% 
+  summarize(residual_mean = mean(diff_fit_all), rmse = sqrt(mean(diff_fit_all^2)), n_countries = n()) %>% 
+  arrange(residual_mean) #%>% 
+  #summarize(cor(abs(residual_mean),n_countries))
+```
+
+#### post-selection inference
+
+```{r}
+predictors <- tidy(fit_all_lasso) %>% filter(term!= "(Intercept)") %>% pull(term)
+predictors_selected <- tidy(fit_all_lasso) %>% filter(estimate!=0, term!= "(Intercept)") %>% pull(term)
+x <- as.matrix(data_2015 %>% 
+                 select(all_of(predictors)) %>% 
+                 mutate(across(where(is.numeric),  ~(scale(.) %>% as.vector)))
+               )
+y <- data_2015 %>% pull(life_expect)
+
+gfit <- glmnet(x,y,standardize=FALSE)
+
+n=data_2015 %>% summarise(n=n()) %>% pull(n)
+
+lambda= 0.36 *n
+
+beta <- coef(gfit, x=x, y=y, s=lambda/n, exact=TRUE)[-1]
+  #tidy(fit_log_all_lasso_0.0355_standard) %>% filter(term!="(Intercept)") %>% pull(estimate)
+
+postInf <- fixedLassoInf(x,y,beta,lambda, alpha = 0.05)
+
+p_post <- postInf$pv %>% setNames(predictors_selected)
+```
+```{r}
+postInf
+```
+```{r}
+lm_sel_standard <- lm(life_expect ~ 
+             drinking_water_basic +
+             electricity +
+             sanitation_basic +  
+             air_pollution_particles +
+             uhc_who +
+             dtp3 +
+             unmet_contraception +
+             cbn_poverty +
+             voice +
+             HIV_unaids_untreated + 
+             gdp, 
+             data_2015 %>% 
+               #mutate(gdp=log(gdp)) %>% 
+               mutate(across(where(is.numeric) & !population & !life_expect,  ~(scale(.) %>% as.vector))))
+summary(lm_sel_standard)
+```
+```{r}
+lm_sel <- lm(life_expect ~ 
+             drinking_water_basic +
+             electricity +
+             sanitation_basic +  
+             air_pollution_particles +
+             uhc_who +
+             dtp3 +
+             unmet_contraception +
+             cbn_poverty +
+             voice +
+             HIV_unaids_untreated + 
+             gdp, data_2015)
+summary(lm_sel)
+```
+
+make summary table with stargazer but use p values from post-selection inference
+```{r}
+stargazer(lm_sel, lm_sel_standard,
+          report = 'vc*', 
+          title = "Post-selection inference for best lasso model, predictors in original units (1) and standardised (2)", 
+          #dep.var.caption = "Life satisfaction (0-10 Cantril Scale)", 
+          dep.var.labels = "Life expectancy (years)", 
+          #column.labels=c("original units", "standardised predictors"), 
+          covariate.labels = c("Intercept","Drinking water", "Electricity", "Sanitation",  "Air pollution (particles)",  "UHC", "DTP3", "Unmet contraception",
+                               "CBN poverty", "Voice", "HIV (untreated)", "GDP"),
+          intercept.bottom = FALSE,
+          align = TRUE, 
+          omit.stat=c("LL","f"),
+          omit = c("Constant"),
+          p = list(p_post, p_post),
+          star.cutoffs =c(0.05, 0.01, 0.001), 
+          #notes = "Standard errors are shown in parentheses.", 
+          notes.append = T, 
+          model.numbers=T, 
+          no.space=T,
+          label= "tab:post_sel_le"
+          )
+```
+
+
+
+
+#### test set performance
+
+
+As test set, use the countries that had not full data coverage for all predictors but for those selected by the lasso model
+
+```{r}
+data_2015_imputed <- read_excel("../data/dataset_need_satisfiers_2015_imputed.xlsx")
+```
+```{r}
+predictors_selected <- tidy(fit_all_lasso) %>% filter(estimate!=0, term!= "(Intercept)") %>% pull(term)
+countries_used <- data_2015 %>% pull(country_name)
+```
+
+
+
+```{r}
+test_set <- data_2015_imputed %>% filter(!country_name %in% countries_used) %>% drop_na(country_name, country_code, continent, region, population, life_expect, all_of(predictors_selected))
+```
+
+
+
+```{r}
+rmse_vec(test_set[["life_expect"]],(fit_all_lasso %>% predict(test_set))$.pred)
+```
+compare to the test set performance of log(GDP)
+```{r}
+rmse_vec(test_set[["life_expect"]],(lm(life_expect ~ log(gdp), data_2015) %>% predict(test_set)))
+
+```
+Our model performs much better :)
+
+
+
